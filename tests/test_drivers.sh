@@ -59,6 +59,12 @@ assert_eq "fake driver exists" "true" \
     "$([ -f "$DRIVERS_DIR/fake.sh" ] && echo true || echo false)"
 assert_eq "codex driver exists" "true" \
     "$([ -f "$DRIVERS_DIR/codex-cli.sh" ] && echo true || echo false)"
+assert_eq "kimi driver exists" "true" \
+    "$([ -f "$DRIVERS_DIR/kimi-cli.sh" ] && echo true || echo false)"
+assert_eq "opencode driver exists" "true" \
+    "$([ -f "$DRIVERS_DIR/opencode.sh" ] && echo true || echo false)"
+assert_eq "droid driver exists" "true" \
+    "$([ -f "$DRIVERS_DIR/droid.sh" ] && echo true || echo false)"
 assert_eq "_common.sh exists" "true" \
     "$([ -f "$DRIVERS_DIR/_common.sh" ] && echo true || echo false)"
 
@@ -389,7 +395,8 @@ echo "=== 16. Driver interface completeness ==="
 
 _required_fns=(agent_default_model agent_name agent_cmd agent_version
                agent_run agent_settings agent_extract_stats
-               agent_activity_jq agent_docker_auth)
+               agent_activity_jq agent_docker_env agent_docker_auth
+               agent_validate_config agent_install_cmd)
 
 source "$DRIVERS_DIR/claude-code.sh"
 for fn in "${_required_fns[@]}"; do
@@ -412,6 +419,24 @@ done
 source "$DRIVERS_DIR/codex-cli.sh"
 for fn in "${_required_fns[@]}"; do
     assert_eq "codex has $fn" "true" \
+        "$(type -t "$fn" &>/dev/null && echo true || echo false)"
+done
+
+source "$DRIVERS_DIR/kimi-cli.sh"
+for fn in "${_required_fns[@]}"; do
+    assert_eq "kimi has $fn" "true" \
+        "$(type -t "$fn" &>/dev/null && echo true || echo false)"
+done
+
+source "$DRIVERS_DIR/opencode.sh"
+for fn in "${_required_fns[@]}"; do
+    assert_eq "opencode has $fn" "true" \
+        "$(type -t "$fn" &>/dev/null && echo true || echo false)"
+done
+
+source "$DRIVERS_DIR/droid.sh"
+for fn in "${_required_fns[@]}"; do
+    assert_eq "droid has $fn" "true" \
         "$(type -t "$fn" &>/dev/null && echo true || echo false)"
 done
 
@@ -1277,7 +1302,271 @@ assert_eq "codex agent2 per-agent driver"    "claude-code" "$LINE2"
 
 # ============================================================
 echo ""
-echo "=== 39. _common.sh — process group reaper (_run_reaped) ==="
+echo "=== 39. Kimi driver — role interface and validation ==="
+
+assert_eq "kimi driver exists" "true" \
+    "$([ -f "$DRIVERS_DIR/kimi-cli.sh" ] && echo true || echo false)"
+
+source "$DRIVERS_DIR/kimi-cli.sh"
+
+assert_eq "kimi name"    "Kimi CLI"        "$(agent_name)"
+assert_eq "kimi cmd"     "kimi"            "$(agent_cmd)"
+assert_eq "kimi default" "kimi-for-coding" "$(agent_default_model)"
+
+KIMI_JQ=$(agent_activity_jq)
+assert_not_empty "kimi jq filter" "$KIMI_JQ"
+assert_contains "kimi jq has tool_calls" "tool_calls" "$KIMI_JQ"
+assert_contains "kimi jq has Shell" "Shell" "$KIMI_JQ"
+
+KIMI_INSTALL=$(agent_install_cmd)
+assert_contains "kimi install has curl" "curl" "$KIMI_INSTALL"
+assert_contains "kimi install has code.kimi.com" "code.kimi.com" "$KIMI_INSTALL"
+
+KIMI_GOOD=$(KIMI_API_KEY="sk-kimi" agent_validate_config \
+    "kimi-for-coding" "" "" "" "" "" 2>/dev/null && echo ok || echo fail)
+assert_eq "kimi validate accepts env api key" "ok" "$KIMI_GOOD"
+
+KIMI_BAD=$(KIMI_API_KEY="" agent_validate_config \
+    "kimi-for-coding" "" "" "" "" "" 2>/dev/null && echo ok || echo fail)
+assert_eq "kimi validate requires key" "fail" "$KIMI_BAD"
+
+KIMI_BAD=$(KIMI_API_KEY="sk-kimi" agent_validate_config \
+    "kimi-for-coding" "" "" "" "oauth" "" 2>/dev/null && echo ok || echo fail)
+assert_eq "kimi validate rejects oauth" "fail" "$KIMI_BAD"
+
+KIMI_BAD=$(KIMI_API_KEY="sk-kimi" agent_validate_config \
+    "kimi-for-coding" "" "" "" "" "token" 2>/dev/null && echo ok || echo fail)
+assert_eq "kimi validate rejects auth_token" "fail" "$KIMI_BAD"
+
+# ============================================================
+echo ""
+echo "=== 40. Kimi driver — settings, stats, fatal, retry, jq ==="
+
+KWORK="$TMPDIR/kimi-workspace"
+mkdir -p "$KWORK/.claude" "$KWORK/.git/info"
+echo "# kimi rules" > "$KWORK/.claude/CLAUDE.md"
+_kimi_home="$TMPDIR/kimi-home"
+mkdir -p "$_kimi_home"
+HOME="$_kimi_home" agent_settings "$KWORK"
+
+assert_eq "kimi config dir created" "true" \
+    "$([ -d "$_kimi_home/.kimi" ] && echo true || echo false)"
+assert_eq "kimi AGENTS bridged" "# kimi rules" \
+    "$(cat "$KWORK/AGENTS.md")"
+
+cat > "$TMPDIR/kimi-session.jsonl" <<'EOF'
+{"role":"assistant","content":"I'll inspect the repo.","tool_calls":[{"type":"function","id":"tc_1","function":{"name":"ReadFile","arguments":"{\"file_path\":\"README.md\"}"}}]}
+{"role":"tool","tool_call_id":"tc_1","content":"# title"}
+{"role":"assistant","content":"Done."}
+EOF
+KSTATS=$(agent_extract_stats "$TMPDIR/kimi-session.jsonl")
+IFS=$'\t' read -r k_cost k_in k_out k_cache_rd k_cache_cr k_dur k_api_ms k_turns <<< "$KSTATS"
+assert_eq "kimi cost is 0" "0" "$k_cost"
+assert_eq "kimi turns from assistant messages" "2" "$k_turns"
+
+cat > "$TMPDIR/kimi-fatal.jsonl.err" <<'EOF'
+Invalid API key for provider swarm
+EOF
+KFATAL=$(agent_detect_fatal "$TMPDIR/kimi-fatal.jsonl" 1)
+assert_contains "kimi fatal from stderr" "Invalid API key" "$KFATAL"
+
+KRETRY=$(agent_is_retriable "$TMPDIR/kimi-session.jsonl" 75)
+assert_not_empty "kimi exit 75 retriable" "$KRETRY"
+
+cat > "$TMPDIR/kimi-auth.err" <<'EOF'
+Invalid API key
+EOF
+KRETRY=$(agent_is_retriable "$TMPDIR/kimi-auth" 1)
+assert_eq "kimi auth not retriable" "" "$KRETRY"
+
+source "$DRIVERS_DIR/kimi-cli.sh"
+agent_activity_jq > "$TMPDIR/kimi.jq"
+KIMI_INPUT='{"role":"assistant","content":"Let me run this.","tool_calls":[{"type":"function","id":"tc_1","function":{"name":"Shell","arguments":"{\"command\":\"npm test\"}"}},{"type":"function","id":"tc_2","function":{"name":"ReadFile","arguments":"{\"file_path\":\"src/main.ts\"}"}}]}'
+KIMI_OUT=$(echo "$KIMI_INPUT" | \
+    AGENT_ID=8 SWARM_JQ_FILTER_FILE="$TMPDIR/kimi.jq" \
+    bash "$FILTER_DIR/activity-filter.sh" 2>/dev/null || true)
+assert_contains "kimi jq shell" "Shell:" "$KIMI_OUT"
+assert_contains "kimi jq readfile" "Read src/main.ts" "$KIMI_OUT"
+
+KAUTH=$(KIMI_API_KEY="sk-kimi" agent_docker_auth "" "" "" "")
+assert_contains "kimi docker auth key" "SWARM_KIMI_API_KEY=sk-kimi" "$KAUTH"
+assert_contains "kimi docker auth label" "SWARM_AUTH_MODE=key" "$KAUTH"
+
+KENV=$(agent_docker_env "")
+assert_contains "kimi docker env disables autoupdate" "KIMI_CLI_NO_AUTO_UPDATE=1" "$KENV"
+
+# ============================================================
+echo ""
+echo "=== 41. OpenCode driver — role interface, auth, parsing ==="
+
+assert_eq "opencode driver exists" "true" \
+    "$([ -f "$DRIVERS_DIR/opencode.sh" ] && echo true || echo false)"
+
+source "$DRIVERS_DIR/opencode.sh"
+
+assert_eq "opencode name"    "OpenCode" "$(agent_name)"
+assert_eq "opencode cmd"     "opencode" "$(agent_cmd)"
+assert_eq "opencode default" "anthropic/claude-sonnet-4-5-20250929" "$(agent_default_model)"
+
+OC_INSTALL=$(agent_install_cmd)
+assert_contains "opencode install has npm" "npm" "$OC_INSTALL"
+assert_contains "opencode install has opencode-ai" "opencode-ai" "$OC_INSTALL"
+
+OC_GOOD=$(agent_validate_config "anthropic/claude-sonnet-4-5-20250929" "" "" "" "" "" 2>/dev/null && echo ok || echo fail)
+assert_eq "opencode validate accepts provider/model" "ok" "$OC_GOOD"
+
+OC_BAD=$(agent_validate_config "claude-sonnet-4-5" "" "" "" "" "" 2>/dev/null && echo ok || echo fail)
+assert_eq "opencode validate requires slash model" "fail" "$OC_BAD"
+
+OC_BAD=$(agent_validate_config "anthropic/claude-sonnet-4-5-20250929" "https://x" "" "" "" "" 2>/dev/null && echo ok || echo fail)
+assert_eq "opencode validate rejects base_url" "fail" "$OC_BAD"
+
+OC_BAD=$(agent_validate_config "anthropic/claude-sonnet-4-5-20250929" "" "sk-test" "" "" "" 2>/dev/null && echo ok || echo fail)
+assert_eq "opencode validate rejects api_key" "fail" "$OC_BAD"
+
+OWORK="$TMPDIR/opencode-workspace"
+mkdir -p "$OWORK"
+_ocode_home="$TMPDIR/opencode-home"
+mkdir -p "$_ocode_home"
+HOME="$_ocode_home" agent_settings "$OWORK"
+assert_eq "opencode config dir created" "true" \
+    "$([ -d "$_ocode_home/.config/opencode" ] && echo true || echo false)"
+assert_eq "opencode data dir created" "true" \
+    "$([ -d "$_ocode_home/.local/share/opencode" ] && echo true || echo false)"
+
+cat > "$TMPDIR/opencode-session.jsonl" <<'EOF'
+{"type":"message","role":"assistant","text":"I'll inspect the repository."}
+{"type":"tool_call","toolName":"bash","parameters":{"command":"npm test"}}
+{"type":"completion","durationMs":4321}
+EOF
+OSTATS=$(agent_extract_stats "$TMPDIR/opencode-session.jsonl")
+IFS=$'\t' read -r o_cost o_in o_out o_cache_rd o_cache_cr o_dur o_api_ms o_turns <<< "$OSTATS"
+assert_eq "opencode cost is 0" "0" "$o_cost"
+assert_eq "opencode duration" "4321" "$o_dur"
+assert_eq "opencode assistant turns" "1" "$o_turns"
+
+cat > "$TMPDIR/opencode-fatal.err" <<'EOF'
+Error: attempt to write a readonly database
+EOF
+OFATAL=$(agent_detect_fatal "$TMPDIR/opencode-fatal" 1)
+assert_contains "opencode fatal from stderr" "readonly database" "$OFATAL"
+
+cat > "$TMPDIR/opencode-retry.err" <<'EOF'
+Error: 429 Too many requests
+EOF
+ORETRY=$(agent_is_retriable "$TMPDIR/opencode-retry")
+assert_not_empty "opencode 429 retriable" "$ORETRY"
+
+source "$DRIVERS_DIR/opencode.sh"
+agent_activity_jq > "$TMPDIR/opencode.jq"
+OPENCODE_INPUT='{"type":"tool_call","toolName":"bash","parameters":{"command":"npm test"}}'
+OC_OUT=$(echo "$OPENCODE_INPUT" | \
+    AGENT_ID=9 SWARM_JQ_FILTER_FILE="$TMPDIR/opencode.jq" \
+    bash "$FILTER_DIR/activity-filter.sh" 2>/dev/null || true)
+assert_contains "opencode jq shell" "Shell:" "$OC_OUT"
+assert_contains "opencode jq command" "npm test" "$OC_OUT"
+
+OPENCODE_INPUT='{"role":"assistant","tool_calls":[{"function":{"name":"read","arguments":"{\"filePath\":\"src/app.ts\"}"}}]}'
+OC_OUT=$(echo "$OPENCODE_INPUT" | \
+    AGENT_ID=9 SWARM_JQ_FILTER_FILE="$TMPDIR/opencode.jq" \
+    bash "$FILTER_DIR/activity-filter.sh" 2>/dev/null || true)
+assert_contains "opencode jq assistant tool_calls" "Read src/app.ts" "$OC_OUT"
+
+_op_auth="$TMPDIR/opencode-auth.json"
+echo '{"openai":{"apiKey":"sk-op"}}' > "$_op_auth"
+OAUTH=$(OPENCODE_AUTH_JSON="$_op_auth" agent_docker_auth "" "" "" "")
+assert_contains "opencode docker auth mount" "$_op_auth" "$OAUTH"
+assert_contains "opencode docker auth label" "SWARM_AUTH_MODE=file" "$OAUTH"
+
+OENV=$(agent_docker_env "")
+assert_contains "opencode docker env disables autoupdate" "OPENCODE_DISABLE_AUTOUPDATE=1" "$OENV"
+
+# ============================================================
+echo ""
+echo "=== 42. Droid driver — role interface, auth, parsing ==="
+
+assert_eq "droid driver exists" "true" \
+    "$([ -f "$DRIVERS_DIR/droid.sh" ] && echo true || echo false)"
+
+source "$DRIVERS_DIR/droid.sh"
+
+assert_eq "droid name"    "Droid"   "$(agent_name)"
+assert_eq "droid cmd"     "droid"   "$(agent_cmd)"
+assert_eq "droid default" "glm-4.7" "$(agent_default_model)"
+
+DR_INSTALL=$(agent_install_cmd)
+assert_contains "droid install has npm" "npm" "$DR_INSTALL"
+assert_contains "droid install has droid" "droid" "$DR_INSTALL"
+
+DR_GOOD=$(FACTORY_API_KEY="fk-test" agent_validate_config "glm-4.7" "" "" "" "" "" 2>/dev/null && echo ok || echo fail)
+assert_eq "droid validate accepts FACTORY_API_KEY" "ok" "$DR_GOOD"
+
+DR_BAD=$(FACTORY_API_KEY="" agent_validate_config "glm-4.7" "" "" "" "" "" 2>/dev/null && echo ok || echo fail)
+assert_eq "droid validate requires FACTORY_API_KEY" "fail" "$DR_BAD"
+
+DR_BAD=$(FACTORY_API_KEY="fk-test" agent_validate_config "glm-4.7" "" "sk-test" "" "" "" 2>/dev/null && echo ok || echo fail)
+assert_eq "droid validate rejects api_key field" "fail" "$DR_BAD"
+
+DWORK="$TMPDIR/droid-workspace"
+mkdir -p "$DWORK/.claude" "$DWORK/.git/info"
+echo "# droid rules" > "$DWORK/.claude/CLAUDE.md"
+_droid_home="$TMPDIR/droid-home"
+mkdir -p "$_droid_home"
+HOME="$_droid_home" SWARM_EFFORT="high" agent_settings "$DWORK"
+assert_eq "droid settings file created" "true" \
+    "$([ -f "$_droid_home/.factory/settings.local.json" ] && echo true || echo false)"
+assert_eq "droid settings valid JSON" "true" \
+    "$(jq empty "$_droid_home/.factory/settings.local.json" 2>/dev/null && echo true || echo false)"
+assert_eq "droid reasoning effort persisted" "high" \
+    "$(jq -r '.reasoningEffort' "$_droid_home/.factory/settings.local.json")"
+assert_eq "droid AGENTS bridged" "# droid rules" \
+    "$(cat "$DWORK/AGENTS.md")"
+
+cat > "$TMPDIR/droid-session.jsonl" <<'EOF'
+{"type":"system","subtype":"init","session_id":"abc-123","model":"glm-4.7"}
+{"type":"tool_call","toolName":"Execute","parameters":{"command":"ls -la"}}
+{"type":"completion","finalText":"Done.","numTurns":2,"durationMs":3000,"session_id":"abc-123"}
+EOF
+DSTATS=$(agent_extract_stats "$TMPDIR/droid-session.jsonl")
+IFS=$'\t' read -r d_cost d_in d_out d_cache_rd d_cache_cr d_dur d_api_ms d_turns <<< "$DSTATS"
+assert_eq "droid cost is 0" "0" "$d_cost"
+assert_eq "droid duration" "3000" "$d_dur"
+assert_eq "droid turns" "2" "$d_turns"
+
+cat > "$TMPDIR/droid-fatal.err" <<'EOF'
+Error: FACTORY_API_KEY is invalid
+EOF
+DFATAL=$(agent_detect_fatal "$TMPDIR/droid-fatal" 1)
+assert_contains "droid fatal from stderr" "FACTORY_API_KEY" "$DFATAL"
+
+cat > "$TMPDIR/droid-retry.err" <<'EOF'
+Error: 429 Too many requests
+EOF
+DRETRY=$(agent_is_retriable "$TMPDIR/droid-retry")
+assert_not_empty "droid 429 retriable" "$DRETRY"
+
+source "$DRIVERS_DIR/droid.sh"
+agent_activity_jq > "$TMPDIR/droid.jq"
+DROID_INPUT='{"type":"tool_call","toolName":"Execute","parameters":{"command":"git status"}}'
+DROID_OUT=$(echo "$DROID_INPUT" | \
+    AGENT_ID=10 SWARM_JQ_FILTER_FILE="$TMPDIR/droid.jq" \
+    bash "$FILTER_DIR/activity-filter.sh" 2>/dev/null || true)
+assert_contains "droid jq shell" "Shell:" "$DROID_OUT"
+assert_contains "droid jq command" "git status" "$DROID_OUT"
+
+DROID_INPUT='{"type":"tool_call","toolName":"Read","parameters":{"file_path":"src/main.py"}}'
+DROID_OUT=$(echo "$DROID_INPUT" | \
+    AGENT_ID=10 SWARM_JQ_FILTER_FILE="$TMPDIR/droid.jq" \
+    bash "$FILTER_DIR/activity-filter.sh" 2>/dev/null || true)
+assert_contains "droid jq read" "Read src/main.py" "$DROID_OUT"
+
+DAUTH=$(FACTORY_API_KEY="fk-test" agent_docker_auth "" "" "" "")
+assert_contains "droid docker auth key" "FACTORY_API_KEY=fk-test" "$DAUTH"
+assert_contains "droid docker auth label" "SWARM_AUTH_MODE=key" "$DAUTH"
+
+# ============================================================
+echo ""
+echo "=== 43. _common.sh — process group reaper (_run_reaped) ==="
 
 # Agent CLIs commonly spawn helper children (MCP servers, reasoning
 # workers, IPC brokers) that inherit stdout. When the CLI's main
@@ -1297,7 +1586,7 @@ assert_eq "_run_reaped is defined" "function" \
 # `| stdbuf -oL tee "$logfile"` form is absent. Pin both per
 # driver. fake.sh is intentionally exempt -- it emits synthetic
 # JSONL inline and never spawns external children.
-for _drv in claude-code codex-cli gemini-cli; do
+for _drv in claude-code codex-cli gemini-cli kimi-cli opencode droid; do
     assert_eq "$_drv: adopts _run_reaped" "1" \
         "$(grep -cE '^[[:space:]]*_run_reaped "\$logfile"' "$DRIVERS_DIR/$_drv.sh")"
     assert_eq "$_drv: drops bare tee pipe" "0" \

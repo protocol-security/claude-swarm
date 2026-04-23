@@ -12,6 +12,7 @@ agent_default_model() { echo "fake-model"; }
 agent_name()    { echo "Fake Agent"; }
 agent_cmd()     { echo "fake-agent"; }
 agent_version() { echo "0.0.0-fake"; }
+agent_validate_config() { :; }
 
 # Run one fake agent session.
 # Emits a minimal but realistic JSONL stream: init, assistant, result.

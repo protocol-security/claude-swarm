@@ -14,7 +14,11 @@ Based on the agent-team pattern from
 - [Docker](https://docs.docker.com/get-docker/)
 - bash (5.0+), git, jq, bc
 - tput (ncurses) — used by the dashboard
-- An Anthropic API key, OAuth token, or compatible endpoint
+- Credentials for the driver(s) you use:
+  `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`,
+  `GEMINI_API_KEY`, `OPENAI_API_KEY` or `~/.codex/auth.json`,
+  `KIMI_API_KEY`, `~/.local/share/opencode/auth.json`
+  (or `OPENCODE_AUTH_JSON`), `FACTORY_API_KEY`
 
 For development: `shellcheck` for linting.
 
@@ -105,7 +109,8 @@ Groups without `api_key` use `ANTHROPIC_API_KEY` or
 
 **Per-group fields:** `model`, `count`, `effort`, `context`,
 `prompt`, `auth`, `api_key`, `auth_token`, `base_url`, `tag`,
-`driver`. See [USAGE.md](USAGE.md) for
+`driver`. Auth fields are driver-specific. See
+[USAGE.md](USAGE.md) for
 field reference, environment variables, auth modes, context
 modes, per-group prompts, and agent drivers.
 
@@ -117,6 +122,7 @@ Each driver implements a fixed role interface:
 | Function | Description |
 | --- | --- |
 | `agent_name` | Human-readable name (e.g. "Claude Code") |
+| `agent_default_model` | Fallback model when config omits one |
 | `agent_cmd` | CLI command (e.g. "claude") |
 | `agent_version` | CLI version string |
 | `agent_run` | Run one session, output JSONL |
@@ -125,8 +131,15 @@ Each driver implements a fixed role interface:
 | `agent_detect_fatal` | Detect fatal errors from log + exit code |
 | `agent_is_retriable` | Detect retriable errors (rate limits, overload) |
 | `agent_activity_jq` | jq filter for activity display |
+| `agent_docker_env` | Emit driver-specific env vars for the container |
+| `agent_docker_auth` | Resolve driver auth/mounts for the container |
+| `agent_validate_config` | Reject unsupported config/auth combinations early |
+| `agent_install_cmd` | Document how the CLI is installed in Docker |
 
 Built-in drivers: `claude-code` (default), `gemini-cli`,
-`codex-cli`, `fake` (test double).  See
+`codex-cli`, `kimi-cli`, `opencode`, `droid`, `fake`
+(test double). `kimi-cli` uses swarm `api_key`/`base_url`,
+`opencode` uses its native auth file, and `droid` uses
+`FACTORY_API_KEY`. See
 [USAGE.md](USAGE.md#writing-a-new-driver) for the full interface
 and guide to writing a new driver.

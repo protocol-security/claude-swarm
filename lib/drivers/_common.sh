@@ -229,3 +229,31 @@ _extract_jsonl_stats() {
     printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s" \
         "$cost" "$tok_in" "$tok_out" "$cache_rd" "$cache_cr" "$dur" "$api_ms" "$turns"
 }
+
+_append_git_exclude() {
+    local workspace="$1" entry="$2"
+    local exclude="${workspace}/.git/info/exclude"
+    mkdir -p "${workspace}/.git/info"
+    touch "$exclude"
+    grep -qxF "$entry" "$exclude" 2>/dev/null || echo "$entry" >> "$exclude"
+}
+
+# Bridge Claude-style project instructions into AGENTS.md for CLIs
+# that do not read .claude/CLAUDE.md natively.
+_bridge_agents_md() {
+    local workspace="$1"
+    local src=""
+
+    [ -f "${workspace}/AGENTS.md" ] && return 0
+
+    if [ -f "${workspace}/.claude/CLAUDE.md" ]; then
+        src="${workspace}/.claude/CLAUDE.md"
+    elif [ -f "${workspace}/CLAUDE.md" ]; then
+        src="${workspace}/CLAUDE.md"
+    fi
+
+    [ -n "$src" ] || return 0
+
+    cp "$src" "${workspace}/AGENTS.md"
+    _append_git_exclude "$workspace" "AGENTS.md"
+}

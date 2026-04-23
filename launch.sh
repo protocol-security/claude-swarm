@@ -46,6 +46,31 @@ SWARM_RUN_CONTEXT="${PROJECT}@${SWARM_RUN_HASH} (${SWARM_RUN_BRANCH})"
 BARE_REPO="/tmp/${PROJECT}-upstream.git"
 IMAGE_NAME="${PROJECT}-agent"
 
+_launch_driver_fns=(agent_default_model agent_docker_env agent_docker_auth agent_validate_config)
+
+unload_launch_driver() {
+    local _fn
+    for _fn in "${_launch_driver_fns[@]}"; do
+        unset -f "$_fn" 2>/dev/null || true
+    done
+}
+
+load_launch_driver() {
+    local driver="$1"
+    local file="${SWARM_DIR}/lib/drivers/${driver}.sh"
+    local _fn
+
+    unload_launch_driver
+    # shellcheck source=lib/drivers/claude-code.sh
+    source "$file"
+    for _fn in "${_launch_driver_fns[@]}"; do
+        if ! type -t "$_fn" >/dev/null 2>&1; then
+            echo "ERROR: driver '${driver}' missing required launch function: ${_fn}" >&2
+            exit 1
+        fi
+    done
+}
+
 # Expand a single $VAR reference from the host environment.
 # Supports "$VAR" (entire value is a reference) only -- not inline
 # interpolation.  Returns the original string if no match.
@@ -212,7 +237,9 @@ cmd_start() {
         _checked_drivers+="$_drv "
         if [ ! -f "$SWARM_DIR/lib/drivers/${_drv}.sh" ]; then
             _bad_drivers+="  - ${_drv}\n"
+            continue
         fi
+        load_launch_driver "$_drv"
     done < "$AGENTS_CFG"
     if [ -n "$_bad_drivers" ]; then
         printf "ERROR: unknown driver(s):\n%b" "$_bad_drivers" >&2
@@ -269,9 +296,9 @@ cmd_start() {
         agent_context="${agent_context:-full}"
         agent_driver="${agent_driver:-${SWARM_DRIVER_DEFAULT}}"
 
-        # Source the driver to access agent_docker_env.
-        # shellcheck source=lib/drivers/claude-code.sh
-        source "$SWARM_DIR/lib/drivers/${agent_driver}.sh"
+        load_launch_driver "$agent_driver"
+        agent_validate_config "$agent_model" "$agent_base_url" \
+            "$agent_api_key" "$agent_effort" "$agent_auth" "$agent_auth_token"
         local effective_prompt="${agent_prompt:-$SWARM_PROMPT}"
 
         local ctx_label="" prompt_label="" driver_label=""
@@ -485,9 +512,9 @@ cmd_post_process() {
     done < "/tmp/${PROJECT}-pp-vols.txt"
     rm -f "/tmp/${PROJECT}-pp-vols.txt"
 
-    # Source the driver to access agent_docker_auth / agent_docker_env.
-    # shellcheck source=lib/drivers/claude-code.sh
-    source "$SWARM_DIR/lib/drivers/${pp_driver}.sh"
+    load_launch_driver "$pp_driver"
+    agent_validate_config "$pp_model" "$pp_base_url" \
+        "$pp_api_key" "$pp_effort" "$pp_auth" "$pp_auth_token"
 
     local EXTRA_ENV=()
     while IFS= read -r _ae; do

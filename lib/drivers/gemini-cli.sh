@@ -9,6 +9,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 agent_default_model() { echo "gemini-2.5-pro"; }
 agent_name()    { echo "Gemini CLI"; }
 agent_cmd()     { echo "gemini"; }
+agent_validate_config() { :; }
 
 agent_version() {
     local v

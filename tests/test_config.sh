@@ -1226,6 +1226,56 @@ assert_eq "git name still works" "bot" \
 
 # ============================================================
 echo ""
+echo "=== 35. Kimi-only config ==="
+
+CFG="$TESTS_DIR/configs/kimi-only.json"
+assert_eq "kimi-only count" "2" "$(jq '[.agents[].count] | add' "$CFG")"
+assert_eq "kimi-only driver" "kimi-cli" "$(jq -r '.driver // "claude-code"' "$CFG")"
+assert_eq "kimi-only model[0]" "kimi-for-coding" "$(jq -r '.agents[0].model' "$CFG")"
+assert_eq "kimi-only api_key[0]" '$KIMI_API_KEY' "$(jq -r '.agents[0].api_key' "$CFG")"
+assert_eq "kimi-only effort[0]" "high" "$(jq -r '.agents[0].effort' "$CFG")"
+assert_eq "kimi-only base_url[1]" "https://api.kimi.com/coding/v1" "$(jq -r '.agents[1].base_url' "$CFG")"
+assert_eq "kimi-only effort[1]" "off" "$(jq -r '.agents[1].effort' "$CFG")"
+
+# ============================================================
+echo ""
+echo "=== 36. OpenCode-only config ==="
+
+CFG="$TESTS_DIR/configs/opencode-only.json"
+assert_eq "opencode-only count" "2" "$(jq '[.agents[].count] | add' "$CFG")"
+assert_eq "opencode-only driver" "opencode" "$(jq -r '.driver // "claude-code"' "$CFG")"
+assert_eq "opencode-only model" "anthropic/claude-sonnet-4-5-20250929" "$(jq -r '.agents[0].model' "$CFG")"
+assert_eq "opencode-only effort" "high" "$(jq -r '.agents[0].effort' "$CFG")"
+assert_eq "opencode-only model has provider prefix" "true" \
+    "$(jq -r '.agents[0].model | contains("/")' "$CFG")"
+
+# ============================================================
+echo ""
+echo "=== 37. Droid-only config ==="
+
+CFG="$TESTS_DIR/configs/droid-only.json"
+assert_eq "droid-only count" "2" "$(jq '[.agents[].count] | add' "$CFG")"
+assert_eq "droid-only driver" "droid" "$(jq -r '.driver // "claude-code"' "$CFG")"
+assert_eq "droid-only model" "glm-4.7" "$(jq -r '.agents[0].model' "$CFG")"
+assert_eq "droid-only effort" "medium" "$(jq -r '.agents[0].effort' "$CFG")"
+
+# ============================================================
+echo ""
+echo "=== 38. Mixed Kimi + Claude config ==="
+
+CFG="$TESTS_DIR/configs/mixed-kimi-claude.json"
+assert_eq "mixed-kimi-claude count" "2" "$(jq '[.agents[].count] | add' "$CFG")"
+MDRV1=$(jq -r '.driver as $dd | .agents[0] | (.driver // $dd // "claude-code")' "$CFG")
+MDRV2=$(jq -r '.driver as $dd | .agents[1] | (.driver // $dd // "claude-code")' "$CFG")
+assert_eq "mixed-kimi-claude agent1 driver" "claude-code" "$MDRV1"
+assert_eq "mixed-kimi-claude agent2 driver" "kimi-cli" "$MDRV2"
+assert_eq "mixed-kimi-claude agent2 api_key" '$KIMI_API_KEY' "$(jq -r '.agents[1].api_key' "$CFG")"
+assert_eq "mixed-kimi-claude pp driver" "kimi-cli" \
+    "$(jq -r '.post_process.driver // .driver // "claude-code"' "$CFG")"
+assert_eq "mixed-kimi-claude pp api_key" '$KIMI_API_KEY' "$(jq -r '.post_process.api_key' "$CFG")"
+
+# ============================================================
+echo ""
 echo "==============================="
 echo "  ${PASS} passed, ${FAIL} failed"
 if [ "$FAIL" -gt 0 ]; then

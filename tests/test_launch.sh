@@ -10,6 +10,7 @@ FAIL=0
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
 TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
+DRIVERS_DIR="$TESTS_DIR/../lib/drivers"
 
 assert_eq() {
     local label="$1" expected="$2" actual="$3"
@@ -45,6 +46,13 @@ parse_pp_max_idle() { jq -r '.post_process.max_idle // .max_idle // 3' "$1"; }
 parse_agents_cfg() {
     jq -r '.tag as $dt | .driver as $dd | .agents[] | range(.count) as $i |
         [.model, (.base_url // ""), (.api_key // ""), (.effort // ""), (.auth // ""), (.context // ""), (.prompt // ""), (.auth_token // ""), (.tag // $dt // ""), (.driver // $dd // "")] | join("|")' "$1"
+}
+
+validate_driver_cfg() {
+    local driver="$1" model="$2" base_url="$3" api_key="$4" effort="$5" auth="$6" auth_token="$7"
+    # shellcheck source=/dev/null
+    source "$DRIVERS_DIR/${driver}.sh"
+    agent_validate_config "$model" "$base_url" "$api_key" "$effort" "$auth" "$auth_token"
 }
 
 # Mirrors the per-agent credential selection in launch.sh.
@@ -726,6 +734,15 @@ printf 'gemini-3-flash|||||||||gemini-cli\n' >> "$TMPDIR/agents_dedup.cfg"
 assert_eq "dedup same driver" "gemini-cli" \
     "$(derive_swarm_agents "$TMPDIR/agents_dedup.cfg")"
 
+# Mixed legacy + new drivers.
+: > "$TMPDIR/agents_new_mix.cfg"
+printf 'claude-opus-4-6|||||||||claude-code\n' >> "$TMPDIR/agents_new_mix.cfg"
+printf 'kimi-for-coding|||||||||kimi-cli\n' >> "$TMPDIR/agents_new_mix.cfg"
+printf 'anthropic/claude-sonnet-4-5-20250929|||||||||opencode\n' >> "$TMPDIR/agents_new_mix.cfg"
+printf 'glm-4.7|||||||||droid\n' >> "$TMPDIR/agents_new_mix.cfg"
+assert_eq "new drivers mixed" "claude-code,kimi-cli,opencode,droid" \
+    "$(derive_swarm_agents "$TMPDIR/agents_new_mix.cfg")"
+
 # Post-process adds a new driver.
 : > "$TMPDIR/agents_pp.cfg"
 printf 'gemini-2.5-pro|||||||||gemini-cli\n' >> "$TMPDIR/agents_pp.cfg"
@@ -765,6 +782,38 @@ EOF
 printf 'gemini-2.5-pro|||||||||gemini-cli\n' >> "$TMPDIR/agents_pp_inh.cfg"
 assert_eq "pp inherits top driver" "gemini-cli" \
     "$(derive_swarm_agents "$TMPDIR/agents_pp_inh.cfg" "$TMPDIR/pp_inherit.json")"
+
+# ============================================================
+echo ""
+echo "=== Driver config validation ==="
+
+KIMI_OK=$(KIMI_API_KEY="" validate_driver_cfg \
+    "kimi-cli" "kimi-for-coding" "https://api.kimi.com/coding/v1" \
+    "sk-kimi" "high" "apikey" "" 2>/dev/null && echo ok || echo fail)
+assert_eq "kimi accepts api_key + base_url" "ok" "$KIMI_OK"
+
+KIMI_BAD=$(KIMI_API_KEY="" validate_driver_cfg \
+    "kimi-cli" "kimi-for-coding" "" "" "" "" "" 2>/dev/null && echo ok || echo fail)
+assert_eq "kimi rejects missing key" "fail" "$KIMI_BAD"
+
+OPENCODE_BAD=$(validate_driver_cfg \
+    "opencode" "anthropic/claude-sonnet-4-5-20250929" "" "sk-test" "" "" "" \
+    2>/dev/null && echo ok || echo fail)
+assert_eq "opencode rejects api_key field" "fail" "$OPENCODE_BAD"
+
+OPENCODE_BAD=$(validate_driver_cfg \
+    "opencode" "anthropic/claude-sonnet-4-5-20250929" "" "" "" "apikey" "" \
+    2>/dev/null && echo ok || echo fail)
+assert_eq "opencode rejects auth field" "fail" "$OPENCODE_BAD"
+
+DROID_OK=$(FACTORY_API_KEY="fk-test" validate_driver_cfg \
+    "droid" "glm-4.7" "" "" "medium" "" "" 2>/dev/null && echo ok || echo fail)
+assert_eq "droid accepts env key" "ok" "$DROID_OK"
+
+DROID_BAD=$(FACTORY_API_KEY="fk-test" validate_driver_cfg \
+    "droid" "glm-4.7" "https://factory.example" "" "" "" "" \
+    2>/dev/null && echo ok || echo fail)
+assert_eq "droid rejects base_url field" "fail" "$DROID_BAD"
 
 # ============================================================
 echo ""

@@ -8,6 +8,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 agent_default_model() { echo "claude-opus-4-6"; }
 agent_name()    { echo "Claude Code"; }
 agent_cmd()     { echo "claude"; }
+agent_validate_config() { :; }
 
 agent_version() {
     local v

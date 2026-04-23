@@ -32,6 +32,9 @@ Credentials stay as env vars (not in shell history).
 | `OPENAI_API_KEY` | | OpenAI API key (for Codex CLI driver). |
 | `CODEX_AUTH_JSON` | `~/.codex/auth.json` | Path to Codex auth file (ChatGPT subscription). |
 | `GEMINI_API_KEY` | | Google API key (for Gemini CLI driver). |
+| `KIMI_API_KEY` | | Kimi API key. Usually referenced from swarm config via `"api_key": "$KIMI_API_KEY"`. |
+| `OPENCODE_AUTH_JSON` | `~/.local/share/opencode/auth.json` | Path to OpenCode's native auth file. |
+| `FACTORY_API_KEY` | | Factory API key (for Droid). |
 | `SWARM_CONFIG` | | Path to swarmfile (or place `swarm.json` in repo root). |
 | `SWARM_TITLE` | | Dashboard title override. |
 | `SWARM_SKIP_DEP_CHECK` | | Set to `1` to silence dependency version warnings. |
@@ -54,10 +57,10 @@ Per-group fields in `swarm.json` `agents` array:
 | `effort` | string | Reasoning depth (see below). |
 | `context` | `full`, `slim`, `none` | How much of `.claude/` to keep (default: `full`). |
 | `prompt` | file path | Per-group prompt override (default: top-level). |
-| `auth` | `apikey`, `oauth`, `chatgpt`, omit | Which host credential to inject (see [Auth modes](#auth-modes)). |
-| `api_key` | key or `$VAR` | Per-group API key for third-party endpoints. |
-| `auth_token` | key or `$VAR` | Per-group Bearer token (OpenRouter-style). |
-| `base_url` | URL | Per-group API endpoint. |
+| `auth` | `apikey`, `oauth`, `chatgpt`, omit | Which host credential to inject. Driver-dependent; see [Auth modes](#auth-modes). |
+| `api_key` | key or `$VAR` | Per-group API key. Used by Claude-compatible endpoints and `kimi-cli`. |
+| `auth_token` | key or `$VAR` | Per-group Bearer token for Claude-compatible third-party endpoints. |
+| `base_url` | URL | Per-group API endpoint. Used by Claude-compatible endpoints and optional `kimi-cli` overrides. |
 | `tag` | string or `$VAR` | Label for grouping runs (default: top-level). |
 | `driver` | driver name | Agent driver override (default: top-level or `claude-code`). |
 
@@ -65,6 +68,9 @@ Per-group fields in `swarm.json` `agents` array:
 
 - Claude Code: `low`, `medium`, `high`, `max` (Opus only).
 - Codex CLI: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`.
+- Kimi CLI: empty leaves default behavior; `none`/`off` disables thinking; any other non-empty value enables thinking.
+- OpenCode: passed through verbatim as `--variant`.
+- Droid: written to `~/.factory/settings.local.json` as `reasoningEffort` and also passed to `droid exec -r`.
 - Gemini CLI: ignored.
 
 Top-level fields: `prompt`, `setup`, `max_idle` (default: `3`),
@@ -418,11 +424,11 @@ Three credential mechanisms serve different purposes:
 
 - **`auth`** — Controls which host credential is forwarded to
   the container.  Values: `apikey`, `oauth`, `chatgpt`, or
-  omit (auto-detect).
+  omit (auto-detect). Driver-dependent.
 
 - **`api_key`** — Per-group API key for third-party endpoints
-  (MiniMax, etc.).  Passed as `ANTHROPIC_API_KEY` inside the
-  container.  Supports `$VAR` references to host env vars.
+  (MiniMax, etc.) or for `kimi-cli`. Supports `$VAR`
+  references to host env vars.
 
 - **`auth_token`** — Per-group Bearer token for endpoints
   that use `ANTHROPIC_AUTH_TOKEN` (OpenRouter-style).  Clears
@@ -463,11 +469,81 @@ then set `"auth": "chatgpt"` in your swarm config:
 The auth file is bind-mounted read-only into containers.
 Override the path with `CODEX_AUTH_JSON=/path/to/auth.json`.
 
+### Kimi CLI
+
+Kimi uses swarm-native config fields rather than a host auth
+file. Set `"api_key": "$KIMI_API_KEY"` in the swarmfile, and
+optionally override `base_url` per group:
+
+```json
+{
+  "driver": "kimi-cli",
+  "agents": [
+    {
+      "count": 1,
+      "model": "kimi-for-coding",
+      "api_key": "$KIMI_API_KEY",
+      "effort": "high"
+    }
+  ]
+}
+```
+
+`auth_token` is not supported. `auth` may be omitted or set to
+`apikey`; other values are rejected.
+
+### OpenCode
+
+OpenCode uses its native auth file only. Run `opencode login`
+on the host, or point the swarm at an existing auth file with
+`OPENCODE_AUTH_JSON`:
+
+```json
+{
+  "driver": "opencode",
+  "agents": [
+    {
+      "count": 1,
+      "model": "anthropic/claude-sonnet-4-5-20250929",
+      "effort": "high"
+    }
+  ]
+}
+```
+
+The swarm rejects non-empty `auth`, `api_key`, `auth_token`,
+and `base_url` for this driver. The auth file is mounted to
+`/home/agent/.local/share/opencode/auth.json`.
+
+### Droid
+
+Droid uses `FACTORY_API_KEY` from the host environment and does
+not accept swarm-level `auth`, `api_key`, `auth_token`, or
+`base_url` fields:
+
+```json
+{
+  "driver": "droid",
+  "agents": [
+    {
+      "count": 1,
+      "model": "glm-4.7",
+      "effort": "medium"
+    }
+  ]
+}
+```
+
 ### General rules
 
 Groups with `api_key` or `auth_token` ignore the `auth`
-field; their custom credential is always used.  When neither
-is set, `auth` determines which host credential to inject.
+field; their custom credential is always used for
+Claude-compatible drivers. When neither is set, `auth`
+determines which host credential to inject.
+
+`opencode` and `droid` reject those generic swarm auth fields
+entirely. `kimi-cli` accepts `api_key` plus optional
+`base_url`, but does not use `auth_token`.
 
 The dashboard **Auth** column reflects the actual credential
 source: `key`, `oauth`, `chatgpt`, `token`, or `auto` (see
@@ -524,6 +600,9 @@ Built-in drivers:
 | `claude-code` | `claude` | Yes |
 | `gemini-cli` | `gemini` | |
 | `codex-cli` | `codex` | |
+| `kimi-cli` | `kimi` | |
+| `opencode` | `opencode` | |
+| `droid` | `droid` | |
 | `fake` | (none) | Test double for unit testing |
 
 Set the driver globally in `swarm.json`:
@@ -573,6 +652,7 @@ agent_is_retriable()    # Detect retriable errors (rate limits, overload)
 agent_activity_jq()     # Return jq filter for activity streaming
 agent_docker_env()      # Print -e flags for agent-specific env vars
 agent_docker_auth()     # Resolve credentials, emit Docker -e flags
+agent_validate_config() # Reject unsupported config/auth combinations
 agent_install_cmd()     # Print install commands (documentation only)
 ```
 

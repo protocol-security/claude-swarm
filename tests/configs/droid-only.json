@@ -1,0 +1,11 @@
+{
+  "prompt": "unused",
+  "driver": "droid",
+  "agents": [
+    {
+      "count": 2,
+      "model": "glm-4.7",
+      "effort": "medium"
+    }
+  ]
+}

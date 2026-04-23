@@ -1,0 +1,26 @@
+{
+  "prompt": "unused",
+  "agents": [
+    {
+      "count": 1,
+      "model": "claude-opus-4-6",
+      "driver": "claude-code",
+      "auth": "oauth"
+    },
+    {
+      "count": 1,
+      "model": "kimi-for-coding",
+      "driver": "kimi-cli",
+      "api_key": "$KIMI_API_KEY",
+      "base_url": "https://api.kimi.com/coding/v1",
+      "effort": "off"
+    }
+  ],
+  "post_process": {
+    "prompt": "unused-pp",
+    "model": "kimi-for-coding",
+    "driver": "kimi-cli",
+    "api_key": "$KIMI_API_KEY",
+    "effort": "high"
+  }
+}

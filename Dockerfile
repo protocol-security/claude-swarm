@@ -29,11 +29,16 @@ RUN if echo ",$SWARM_AGENTS," | grep -q ",claude-code,"; then \
         && bash /tmp/claude-install.sh ${CLAUDE_CODE_VERSION:+$CLAUDE_CODE_VERSION} \
         && rm /tmp/claude-install.sh; \
     fi
+
+# --- Kimi CLI ---
+RUN if echo ",$SWARM_AGENTS," | grep -q ",kimi-cli,"; then \
+        curl -LsSf https://code.kimi.com/install.sh | bash; \
+    fi
 ENV PATH="/home/agent/.local/bin:${PATH}"
 
-# --- Node.js (shared by Gemini CLI and Codex CLI) ---
+# --- Node.js (shared by Gemini CLI, Codex CLI, OpenCode, and Droid) ---
 USER root
-RUN if echo ",$SWARM_AGENTS," | grep -qE ",(gemini-cli|codex-cli),"; then \
+RUN if echo ",$SWARM_AGENTS," | grep -qE ",(gemini-cli|codex-cli|opencode|droid),"; then \
         curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
         && apt-get install -y --no-install-recommends nodejs \
         && rm -rf /var/lib/apt/lists/*; \
@@ -49,6 +54,20 @@ RUN if echo ",$SWARM_AGENTS," | grep -q ",codex-cli,"; then \
         npm install -g @openai/codex \
         && mkdir -p /home/agent/.codex \
         && chown agent:agent /home/agent/.codex; \
+    fi
+
+# --- OpenCode ---
+RUN if echo ",$SWARM_AGENTS," | grep -q ",opencode,"; then \
+        npm install -g opencode-ai \
+        && mkdir -p /home/agent/.config/opencode /home/agent/.local/share/opencode \
+        && chown -R agent:agent /home/agent/.config/opencode /home/agent/.local/share/opencode; \
+    fi
+
+# --- Droid ---
+RUN if echo ",$SWARM_AGENTS," | grep -q ",droid,"; then \
+        npm install -g droid \
+        && mkdir -p /home/agent/.factory \
+        && chown -R agent:agent /home/agent/.factory; \
     fi
 USER agent
 
