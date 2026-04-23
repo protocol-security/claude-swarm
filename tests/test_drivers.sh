@@ -608,9 +608,10 @@ CLI
     assert_eq "reaped run: exit code preserved (0)" "0" "$_reap_ec"
     assert_eq "reaped run: stdout captured in logfile" "hello from CLI" \
         "$(cat "$TMPDIR/reap_zero.log")"
-    # Generous bound for slow CI; actual drain is ~10-50ms.
+    # Generous bound for slow CI; actual drain is ~10-50ms, but
+    # shared runners can occasionally delay process scheduling.
     assert_eq "reaped run: drains despite surviving child" "true" \
-        "$([ "$_reap_elapsed" -lt 5 ] && echo true || echo false)"
+        "$([ "$_reap_elapsed" -lt 10 ] && echo true || echo false)"
 
     # Non-zero exit path: exit code is likewise propagated.
     # `|| _reap_ec=$?` keeps set -e from aborting the test script.

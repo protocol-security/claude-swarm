@@ -250,7 +250,7 @@ echo "=== 5. Codex, OpenCode, Kimi, and Droid examples ==="
 CFG="$TESTS_DIR/configs/codex-chatgpt.json"
 assert_eq "codex auth-file driver" "codex-cli" "$(jq -r '.driver' "$CFG")"
 assert_eq "codex auth-file provider kind" "openai" "$(jq -r '.providers.openai_file.kind' "$CFG")"
-assert_eq "codex auth-file path" "~/.codex/auth.json" "$(jq -r '.providers.openai_file.auth_file' "$CFG")"
+assert_eq "codex auth-file path" \~/.codex/auth.json "$(jq -r '.providers.openai_file.auth_file' "$CFG")"
 assert_eq "codex auth-file all refs" "openai_file openai_file" "$(jq -r '[.agents[].provider] | join(" ")' "$CFG")"
 
 CFG="$TESTS_DIR/configs/codex-auth-mixed.json"

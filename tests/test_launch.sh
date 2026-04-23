@@ -197,7 +197,7 @@ export SWARM_TEST_TOKEN="swarm-token"
 assert_eq "expand env ref" "swarm-token" "$(expand_env_ref '$SWARM_TEST_TOKEN')"
 assert_eq "expand literal" "literal" "$(expand_env_ref 'literal')"
 assert_eq "expand unset env ref" "" "$(expand_env_ref '$SWARM_MISSING_TOKEN')"
-assert_eq "expand tilde path" "${HOME}/.codex/auth.json" "$(expand_path_ref '~/.codex/auth.json')"
+assert_eq "expand tilde path" "${HOME}/.codex/auth.json" "$(expand_path_ref \~/.codex/auth.json)"
 
 # ============================================================
 echo ""
