@@ -106,14 +106,13 @@ _reap_watchdog() {
 #   indefinitely.  The harness blocks on the pipe and no progress
 #   is made until the container is externally killed.
 #
-#   `setsid` gives the CLI a fresh session/process group.  On
-#   util-linux, `setsid` may fork internally, so `_run_reaped`
-#   launches a tiny wrapper that records the real session-leader
-#   pid before `exec`ing the CLI.  Every descendant then inherits
-#   that pgid, and after `wait` returns, `kill -KILL -- -$cmd_pid`
-#   signals the entire group, forcing any lingering descendant to
-#   exit and release its pipe FD.  The downstream pipeline then
-#   observes EOF and drains cleanly.
+#   `setsid` gives the CLI a fresh session/process group.  `_run_reaped`
+#   launches a tiny wrapper inside that session which records its pid
+#   (the process-group leader) and then runs the CLI.  Every descendant
+#   the CLI forks inherits that pgid, and after `wait` returns,
+#   `kill -KILL -- -$cmd_pid` signals the entire group, forcing any
+#   lingering descendant to exit and release its pipe FD.  The
+#   downstream pipeline then observes EOF and drains cleanly.
 #
 # WHY AN ACTIVITY WATCHDOG:
 #   The process-group kill only fires after `wait "$_cmd_pid"`
@@ -167,12 +166,19 @@ _run_reaped() {
 
     {
         local _pidfile="${logfile}.pid"
+        local _statusfile="${logfile}.status"
         rm -f "$_pidfile"
+        rm -f "$_statusfile"
         setsid -w bash -c '
             printf "%s\n" "$$" > "$1"
             shift
-            exec "$@"
-        ' bash "$_pidfile" "$@" 2>"${logfile}.err" &
+            _statusfile="$1"
+            shift
+            "$@"
+            _ec=$?
+            printf "%s\n" "$_ec" > "$_statusfile"
+            exit "$_ec"
+        ' bash "$_pidfile" "$_statusfile" "$@" 2>"${logfile}.err" &
         local _setsid_pid=$!
         local _cmd_pid=""
         local _wd_pid=""
@@ -204,6 +210,9 @@ _run_reaped() {
         # exit-42 in unit tests).
         local _ec=0
         wait "$_setsid_pid" || _ec=$?
+        if [ -s "$_statusfile" ]; then
+            IFS= read -r _ec < "$_statusfile"
+        fi
         # Group kill: -$_cmd_pid targets the process group whose
         # leader is the setsid'd command.  Swallow errors -- an
         # already-empty group is fine.
@@ -215,6 +224,7 @@ _run_reaped() {
             wait "$_wd_pid" 2>/dev/null || true
         fi
         rm -f "$_pidfile"
+        rm -f "$_statusfile"
         exit "$_ec"
     } | "${_tee_cmd[@]}"
     return "${PIPESTATUS[0]}"
