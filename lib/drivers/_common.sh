@@ -106,12 +106,14 @@ _reap_watchdog() {
 #   indefinitely.  The harness blocks on the pipe and no progress
 #   is made until the container is externally killed.
 #
-#   `setsid` gives the CLI a fresh session/process group (pgid =
-#   cmd_pid), so every descendant it forks inherits that pgid.
-#   After `wait` returns, `kill -KILL -- -$cmd_pid` signals the
-#   entire group, forcing any lingering descendant to exit and
-#   release its pipe FD.  The downstream pipeline then observes
-#   EOF and drains cleanly.
+#   `setsid` gives the CLI a fresh session/process group.  On
+#   util-linux, `setsid` may fork internally, so `_run_reaped`
+#   launches a tiny wrapper that records the real session-leader
+#   pid before `exec`ing the CLI.  Every descendant then inherits
+#   that pgid, and after `wait` returns, `kill -KILL -- -$cmd_pid`
+#   signals the entire group, forcing any lingering descendant to
+#   exit and release its pipe FD.  The downstream pipeline then
+#   observes EOF and drains cleanly.
 #
 # WHY AN ACTIVITY WATCHDOG:
 #   The process-group kill only fires after `wait "$_cmd_pid"`
@@ -164,9 +166,27 @@ _run_reaped() {
     fi
 
     {
-        setsid "$@" 2>"${logfile}.err" &
-        local _cmd_pid=$!
+        local _pidfile="${logfile}.pid"
+        rm -f "$_pidfile"
+        setsid -w bash -c '
+            printf "%s\n" "$$" > "$1"
+            shift
+            exec "$@"
+        ' bash "$_pidfile" "$@" 2>"${logfile}.err" &
+        local _setsid_pid=$!
+        local _cmd_pid=""
         local _wd_pid=""
+        local _i=0
+        while [ "$_i" -lt 50 ]; do
+            if [ -s "$_pidfile" ]; then
+                IFS= read -r _cmd_pid < "$_pidfile"
+                break
+            fi
+            kill -0 "$_setsid_pid" 2>/dev/null || break
+            sleep 0.02
+            _i=$((_i + 1))
+        done
+        [ -n "$_cmd_pid" ] || _cmd_pid="$_setsid_pid"
         if [ "$_wd_timeout" -gt 0 ]; then
             # Route watchdog diagnostics into the CLI's stderr
             # file so operators inspecting <logfile>.err can tell
@@ -183,7 +203,7 @@ _run_reaped() {
         # holding the tee pipe open (empirically observed on
         # exit-42 in unit tests).
         local _ec=0
-        wait "$_cmd_pid" || _ec=$?
+        wait "$_setsid_pid" || _ec=$?
         # Group kill: -$_cmd_pid targets the process group whose
         # leader is the setsid'd command.  Swallow errors -- an
         # already-empty group is fine.
@@ -194,6 +214,7 @@ _run_reaped() {
             kill "$_wd_pid" 2>/dev/null || true
             wait "$_wd_pid" 2>/dev/null || true
         fi
+        rm -f "$_pidfile"
         exit "$_ec"
     } | "${_tee_cmd[@]}"
     return "${PIPESTATUS[0]}"
