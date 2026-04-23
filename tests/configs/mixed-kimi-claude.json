@@ -1,18 +1,28 @@
 {
   "prompt": "unused",
+  "providers": {
+    "anthropic_oauth": {
+      "kind": "anthropic",
+      "oauth_token": "$CLAUDE_CODE_OAUTH_TOKEN"
+    },
+    "kimi_key": {
+      "kind": "kimi",
+      "api_key": "$KIMI_API_KEY",
+      "base_url": "https://api.kimi.com/coding/v1"
+    }
+  },
   "agents": [
     {
       "count": 1,
       "model": "claude-opus-4-6",
       "driver": "claude-code",
-      "auth": "oauth"
+      "provider": "anthropic_oauth"
     },
     {
       "count": 1,
       "model": "kimi-for-coding",
       "driver": "kimi-cli",
-      "api_key": "$KIMI_API_KEY",
-      "base_url": "https://api.kimi.com/coding/v1",
+      "provider": "kimi_key",
       "effort": "off"
     }
   ],
@@ -20,7 +30,7 @@
     "prompt": "unused-pp",
     "model": "kimi-for-coding",
     "driver": "kimi-cli",
-    "api_key": "$KIMI_API_KEY",
+    "provider": "kimi_key",
     "effort": "high"
   }
 }

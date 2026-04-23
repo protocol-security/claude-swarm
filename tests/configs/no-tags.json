@@ -1,23 +1,36 @@
 {
   "prompt": "unused",
+  "providers": {
+    "anthropic_oauth": {
+      "kind": "anthropic",
+      "oauth_token": "$CLAUDE_CODE_OAUTH_TOKEN"
+    },
+    "anthropic_key": {
+      "kind": "anthropic",
+      "api_key": "$ANTHROPIC_API_KEY"
+    }
+  },
   "agents": [
     {
       "count": 1,
       "model": "claude-opus-4-6",
+      "provider": "anthropic_oauth",
       "effort": "high",
-      "auth": "oauth"
+      "tag": ""
     },
     {
       "count": 1,
       "model": "claude-sonnet-4-6",
+      "provider": "anthropic_oauth",
       "effort": "high",
-      "auth": "oauth"
+      "tag": ""
     },
     {
       "count": 1,
       "model": "claude-opus-4-6",
+      "provider": "anthropic_key",
       "effort": "medium",
-      "auth": "apikey"
+      "tag": ""
     }
   ]
 }

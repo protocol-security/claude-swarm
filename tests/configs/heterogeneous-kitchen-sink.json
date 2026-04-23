@@ -1,5 +1,19 @@
 {
   "prompt": "unused",
+  "providers": {
+    "anthropic_oauth": {
+      "kind": "anthropic",
+      "oauth_token": "$CLAUDE_CODE_OAUTH_TOKEN"
+    },
+    "anthropic_key": {
+      "kind": "anthropic",
+      "api_key": "$ANTHROPIC_API_KEY"
+    },
+    "gemini_key": {
+      "kind": "gemini",
+      "api_key": "$GEMINI_API_KEY"
+    }
+  },
   "pricing": {
     "gemini-2.5-pro":                     {"input": 1.25, "output": 10.00, "cached": 0.13},
     "gemini-3.1-pro-preview":             {"input": 2.00, "output": 12.00, "cached": 0.20},
@@ -12,8 +26,8 @@
       "count": 1,
       "model": "claude-opus-4-6",
       "driver": "claude-code",
+      "provider": "anthropic_oauth",
       "effort": "high",
-      "auth": "oauth",
       "context": "slim",
       "tag": "deep"
     },
@@ -21,6 +35,7 @@
       "count": 1,
       "model": "gemini-2.5-pro",
       "driver": "gemini-cli",
+      "provider": "gemini_key",
       "context": "slim",
       "tag": "gem-scan"
     },
@@ -28,32 +43,36 @@
       "count": 1,
       "model": "gemini-3.1-pro-preview",
       "driver": "gemini-cli",
+      "provider": "gemini_key",
       "tag": "gem-3.1"
     },
     {
       "count": 1,
       "model": "gemini-3.1-pro-preview-customtools",
       "driver": "gemini-cli",
+      "provider": "gemini_key",
       "tag": "gem-ct"
     },
     {
       "count": 1,
       "model": "gemini-3-flash-preview",
       "driver": "gemini-cli",
+      "provider": "gemini_key",
       "tag": "gem-flash"
     },
     {
       "count": 1,
       "model": "gemini-2.5-flash",
       "driver": "gemini-cli",
+      "provider": "gemini_key",
       "tag": "gem-25f"
     },
     {
       "count": 1,
       "model": "claude-sonnet-4-6",
       "driver": "claude-code",
+      "provider": "anthropic_key",
       "effort": "medium",
-      "auth": "apikey",
       "tag": "fast"
     }
   ],
@@ -61,6 +80,6 @@
     "prompt": "unused-pp",
     "model": "claude-opus-4-6",
     "driver": "claude-code",
-    "auth": "oauth"
+    "provider": "anthropic_oauth"
   }
 }

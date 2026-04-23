@@ -1,10 +1,17 @@
 {
   "prompt": "unused",
   "driver": "droid",
+  "providers": {
+    "factory_key": {
+      "kind": "factory",
+      "api_key": "$FACTORY_API_KEY"
+    }
+  },
   "agents": [
     {
       "count": 2,
       "model": "glm-4.7",
+      "provider": "factory_key",
       "effort": "medium"
     }
   ]

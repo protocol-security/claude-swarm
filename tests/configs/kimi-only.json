@@ -1,18 +1,28 @@
 {
   "prompt": "unused",
   "driver": "kimi-cli",
+  "providers": {
+    "kimi_default": {
+      "kind": "kimi",
+      "api_key": "$KIMI_API_KEY"
+    },
+    "kimi_custom": {
+      "kind": "kimi",
+      "api_key": "$KIMI_API_KEY",
+      "base_url": "https://api.kimi.com/coding/v1"
+    }
+  },
   "agents": [
     {
       "count": 1,
       "model": "kimi-for-coding",
-      "api_key": "$KIMI_API_KEY",
+      "provider": "kimi_default",
       "effort": "high"
     },
     {
       "count": 1,
       "model": "kimi-for-coding",
-      "api_key": "$KIMI_API_KEY",
-      "base_url": "https://api.kimi.com/coding/v1",
+      "provider": "kimi_custom",
       "effort": "off"
     }
   ]

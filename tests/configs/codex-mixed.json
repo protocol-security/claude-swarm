@@ -1,5 +1,15 @@
 {
   "prompt": "unused",
+  "providers": {
+    "anthropic_oauth": {
+      "kind": "anthropic",
+      "oauth_token": "$CLAUDE_CODE_OAUTH_TOKEN"
+    },
+    "openai_key": {
+      "kind": "openai",
+      "api_key": "$OPENAI_API_KEY"
+    }
+  },
   "pricing": {
     "gpt-5.4":            {"input": 2.50,  "output": 15.00,  "cached": 0.25},
     "gpt-5.4-pro":        {"input": 30.00, "output": 180.00},
@@ -31,24 +41,27 @@
       "count": 1,
       "model": "claude-opus-4-6",
       "driver": "claude-code",
-      "auth": "oauth"
+      "provider": "anthropic_oauth"
     },
     {
       "count": 1,
       "model": "gpt-5.4",
       "driver": "codex-cli",
+      "provider": "openai_key",
       "effort": "high"
     },
     {
       "count": 1,
       "model": "gpt-5.3-codex",
       "driver": "codex-cli",
+      "provider": "openai_key",
       "effort": "medium"
     },
     {
       "count": 1,
       "model": "gpt-5.2",
-      "driver": "codex-cli"
+      "driver": "codex-cli",
+      "provider": "openai_key"
     }
   ]
 }

@@ -1,15 +1,23 @@
 {
   "prompt": "unused",
+  "providers": {
+    "gemini_key": {
+      "kind": "gemini",
+      "api_key": "$GEMINI_API_KEY"
+    }
+  },
   "agents": [
     {
       "count": 2,
       "model": "gemini-2.5-pro",
-      "driver": "gemini-cli"
+      "driver": "gemini-cli",
+      "provider": "gemini_key"
     }
   ],
   "post_process": {
     "prompt": "unused-pp",
     "model": "gemini-2.5-flash",
-    "driver": "gemini-cli"
+    "driver": "gemini-cli",
+    "provider": "gemini_key"
   }
 }

@@ -11,19 +11,64 @@ agent_name()    { echo "OpenCode"; }
 agent_cmd()     { echo "opencode"; }
 
 # Validate launch-time config for the OpenCode driver.
-# Args: <model> <base_url> <api_key> <effort> <auth_mode> <auth_token>
+# Args: <model> <provider_ref> <kind> <api_key> <oauth_token> <bearer_token> <auth_file> <base_url> <effort>
 agent_validate_config() {
-    local model="$1" base_url="$2" api_key="$3" _effort="$4"
-    local auth_mode="$5" auth_token="$6"
+    local model="$1" provider_ref="$2" kind="$3" api_key="$4"
+    local oauth_token="$5" bearer_token="$6" auth_file="$7" base_url="$8" _effort="$9"
+    local auth_count=0 model_prefix=""
 
-    if [ -n "$base_url" ] || [ -n "$api_key" ] || [ -n "$auth_mode" ] || [ -n "$auth_token" ]; then
-        echo "ERROR: driver opencode does not use swarm auth/base_url fields; configure native credentials via OPENCODE_AUTH_JSON or ~/.local/share/opencode/auth.json." >&2
-        return 1
-    fi
     if [[ "$model" != */* ]]; then
         echo "ERROR: driver opencode requires model in provider/model format (for example anthropic/claude-sonnet-4-5-20250929)." >&2
         return 1
     fi
+    model_prefix="${model%%/*}"
+    [ -n "$api_key" ] && auth_count=$((auth_count + 1))
+    [ -n "$oauth_token" ] && auth_count=$((auth_count + 1))
+    [ -n "$bearer_token" ] && auth_count=$((auth_count + 1))
+    [ -n "$auth_file" ] && auth_count=$((auth_count + 1))
+
+    case "$kind" in
+        anthropic)
+            if [ "$model_prefix" != "anthropic" ] || [ "$auth_count" -ne 1 ] || [ -n "$bearer_token" ]; then
+                echo "ERROR: driver opencode requires kind=anthropic, model prefix anthropic/, and exactly one of api_key, oauth_token, or auth_file." >&2
+                return 1
+            fi
+            ;;
+        anthropic-compatible)
+            if [ "$model_prefix" != "anthropic" ] || [ -z "$base_url" ] || [ "$auth_count" -ne 1 ] || [ -n "$oauth_token" ]; then
+                echo "ERROR: driver opencode requires kind=anthropic-compatible, model prefix anthropic/, base_url, and exactly one of api_key, bearer_token, or auth_file." >&2
+                return 1
+            fi
+            ;;
+        openai)
+            if [ "$model_prefix" != "openai" ] || [ "$auth_count" -ne 1 ] || [ -n "$oauth_token" ] || [ -n "$bearer_token" ]; then
+                echo "ERROR: driver opencode requires kind=openai, model prefix openai/, and exactly one of api_key or auth_file." >&2
+                return 1
+            fi
+            ;;
+        openai-compatible)
+            if [ "$model_prefix" != "$provider_ref" ] || [ -z "$base_url" ] || [ "$auth_count" -ne 1 ] || [ -n "$oauth_token" ]; then
+                echo "ERROR: driver opencode requires kind=openai-compatible, model prefix ${provider_ref}/, base_url, and exactly one of api_key, bearer_token, or auth_file." >&2
+                return 1
+            fi
+            ;;
+        gemini)
+            if [ "$model_prefix" != "google" ] || [ -z "$api_key" ] || [ "$auth_count" -ne 1 ] || [ -n "$base_url" ]; then
+                echo "ERROR: driver opencode requires kind=gemini, model prefix google/, and api_key only." >&2
+                return 1
+            fi
+            ;;
+        kimi)
+            if [ "$model_prefix" != "moonshotai" ] || [ -z "$api_key" ] || [ "$auth_count" -ne 1 ]; then
+                echo "ERROR: driver opencode requires kind=kimi, model prefix moonshotai/, and api_key." >&2
+                return 1
+            fi
+            ;;
+        *)
+            echo "ERROR: driver opencode does not support provider kind '${kind}'." >&2
+            return 1
+            ;;
+    esac
 }
 
 agent_version() {
@@ -57,7 +102,140 @@ agent_run() {
 
 agent_settings() {
     local _workspace="$1"
-    mkdir -p "${HOME}/.config/opencode" "${HOME}/.local/share/opencode"
+    local config_dir="${HOME}/.config/opencode"
+    local data_dir="${HOME}/.local/share/opencode"
+    local config_file="${config_dir}/opencode.json"
+    local auth_file="${data_dir}/auth.json"
+    local provider_ref="${SWARM_PROVIDER_NAME:-}"
+    local kind="${SWARM_PROVIDER_KIND:-}"
+    local model="${SWARM_MODEL:-}"
+    local api_key="${SWARM_PROVIDER_API_KEY:-}"
+    local oauth_token="${SWARM_PROVIDER_OAUTH_TOKEN:-}"
+    local bearer_token="${SWARM_PROVIDER_BEARER_TOKEN:-}"
+    local base_url="${SWARM_PROVIDER_BASE_URL:-}"
+    local mounted_auth="${SWARM_PROVIDER_AUTH_FILE_CONTAINER:-}"
+    local model_suffix="${model#*/}"
+    local config=""
+
+    mkdir -p "$config_dir" "$data_dir"
+    rm -f "$auth_file"
+    if [ -n "$mounted_auth" ] && [ -f "$mounted_auth" ]; then
+        cp "$mounted_auth" "$auth_file"
+    elif [ "$kind" = "anthropic" ] && [ -n "$oauth_token" ]; then
+        jq -nc --arg access "$oauth_token" '
+            {anthropic:{type:"oauth",refresh:"",access:$access,expires:253402300799000}}
+        ' > "$auth_file"
+    fi
+
+    case "$kind" in
+        anthropic|anthropic-compatible)
+            config=$(jq -nc \
+                --arg model "$model" \
+                --arg base_url "$base_url" \
+                --arg api_key "$api_key" \
+                --arg bearer_token "$bearer_token" '
+                {
+                  "$schema": "https://opencode.ai/config.json",
+                  autoupdate: false,
+                  model: $model,
+                  provider: {
+                    anthropic: {
+                      options:
+                        ((if $base_url != "" then {baseURL: $base_url} else {} end) +
+                         (if $api_key != "" then {apiKey: $api_key} else {} end) +
+                         (if $bearer_token != "" then {headers: {Authorization: ("Bearer " + $bearer_token)}} else {} end))
+                    }
+                  }
+                }')
+            ;;
+        openai)
+            config=$(jq -nc \
+                --arg model "$model" \
+                --arg base_url "$base_url" \
+                --arg api_key "$api_key" '
+                {
+                  "$schema": "https://opencode.ai/config.json",
+                  autoupdate: false,
+                  model: $model,
+                  provider: {
+                    openai: {
+                      options:
+                        ((if $base_url != "" then {baseURL: $base_url} else {} end) +
+                         (if $api_key != "" then {apiKey: $api_key} else {} end))
+                    }
+                  }
+                }')
+            ;;
+        openai-compatible)
+            config=$(jq -nc \
+                --arg provider_ref "$provider_ref" \
+                --arg model "$model" \
+                --arg model_suffix "$model_suffix" \
+                --arg base_url "$base_url" \
+                --arg api_key "$api_key" \
+                --arg bearer_token "$bearer_token" '
+                {
+                  "$schema": "https://opencode.ai/config.json",
+                  autoupdate: false,
+                  model: $model,
+                  provider: {
+                    ($provider_ref): {
+                      npm: "@ai-sdk/openai-compatible",
+                      name: $provider_ref,
+                      options:
+                        ((if $base_url != "" then {baseURL: $base_url} else {} end) +
+                         (if $api_key != "" then {apiKey: $api_key} else {} end) +
+                         (if $bearer_token != "" then {headers: {Authorization: ("Bearer " + $bearer_token)}} else {} end)),
+                      models: {
+                        ($model_suffix): {}
+                      }
+                    }
+                  }
+                }')
+            ;;
+        gemini)
+            config=$(jq -nc \
+                --arg model "$model" \
+                --arg api_key "$api_key" '
+                {
+                  "$schema": "https://opencode.ai/config.json",
+                  autoupdate: false,
+                  model: $model,
+                  provider: {
+                    google: {
+                      options: {
+                        apiKey: $api_key
+                      }
+                    }
+                  }
+                }')
+            ;;
+        kimi)
+            config=$(jq -nc \
+                --arg model "$model" \
+                --arg api_key "$api_key" \
+                --arg base_url "$base_url" '
+                {
+                  "$schema": "https://opencode.ai/config.json",
+                  autoupdate: false,
+                  model: $model,
+                  provider: {
+                    moonshotai: {
+                      options:
+                        ({apiKey: $api_key} +
+                         (if $base_url != "" then {baseURL: $base_url} else {} end))
+                    }
+                  }
+                }')
+            ;;
+        *)
+            config=$(jq -nc --arg model "$model" '
+                {"$schema":"https://opencode.ai/config.json",autoupdate:false,model:$model}
+            ')
+            ;;
+    esac
+
+    printf '%s\n' "$config" > "$config_file"
 }
 
 agent_extract_stats() {
@@ -168,16 +346,21 @@ agent_docker_env() {
 }
 
 agent_docker_auth() {
-    local _api_key="$1" _auth_token="$2" _auth_mode="$3" _base_url="$4"
-    local auth_json="${OPENCODE_AUTH_JSON:-${HOME}/.local/share/opencode/auth.json}"
+    local _provider_ref="$1" _kind="$2" api_key="$3" oauth_token="$4"
+    local bearer_token="$5" auth_file="$6" _base_url="$7"
     local label=""
-    local _mount_fmt='--mount\ntype=bind,source=%s,target=/home/agent/.local/share/opencode/auth.json,readonly\n'
+    local _mount_fmt='--mount\ntype=bind,source=%s,target=/tmp/swarm/opencode-provider-auth.json,readonly\n'
 
-    if [ -d "$auth_json" ]; then
-        echo "WARNING: ${auth_json} is a directory (should be a file)." >&2
-    elif [ -f "$auth_json" ]; then
-        printf -- "$_mount_fmt" "$auth_json"
+    if [ -f "$auth_file" ]; then
+        printf -- "$_mount_fmt" "$auth_file"
+        printf -- '-e\nSWARM_PROVIDER_AUTH_FILE_CONTAINER=/tmp/swarm/opencode-provider-auth.json\n'
         label="file"
+    elif [ -n "$oauth_token" ]; then
+        label="oauth"
+    elif [ -n "$bearer_token" ]; then
+        label="token"
+    elif [ -n "$api_key" ]; then
+        label="key"
     fi
 
     printf -- '-e\nSWARM_AUTH_MODE=%s\n' "$label"

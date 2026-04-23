@@ -180,9 +180,13 @@ run_integration_case() {
     case "$model_or_cfg" in
         config-mixed)
             jq -n --arg m1 "$dm" --arg m2 "claude-sonnet-4-6" \
-                '{prompt: "unused", agents: [
-                    {count: 2, model: $m1},
-                    {count: 1, model: $m2}
+                '{prompt: "unused",
+                  providers: {
+                    anthropic_key: {kind: "anthropic", api_key: "$ANTHROPIC_API_KEY"}
+                  },
+                  agents: [
+                    {count: 2, model: $m1, provider: "anthropic_key"},
+                    {count: 1, model: $m2, provider: "anthropic_key"}
                 ]}' > "$cfg"
             ;;
         config-pp)
@@ -196,60 +200,96 @@ PPPROMPT
             cp "$pp_prompt" "$REPO_ROOT/.claude-swarm-pp-prompt.md"
             jq -n --arg m "$dm" --arg pp ".claude-swarm-pp-prompt.md" \
                 '{prompt: "unused",
-                  agents: [{count: '"$num_agents"', model: $m}],
-                  post_process: {prompt: $pp, model: $m}}' \
+                  providers: {
+                    anthropic_key: {kind: "anthropic", api_key: "$ANTHROPIC_API_KEY"}
+                  },
+                  agents: [{count: '"$num_agents"', model: $m, provider: "anthropic_key"}],
+                  post_process: {prompt: $pp, model: $m, provider: "anthropic_key"}}' \
                 > "$cfg"
             rm -f "$pp_prompt"
             ;;
         config-effort-single)
             jq -n --arg m "$dm" \
-                '{prompt: "unused", agents: [{count: '"$num_agents"', model: $m, effort: "medium"}]}' \
+                '{prompt: "unused",
+                  providers: {
+                    anthropic_key: {kind: "anthropic", api_key: "$ANTHROPIC_API_KEY"}
+                  },
+                  agents: [{count: '"$num_agents"', model: $m, provider: "anthropic_key", effort: "medium"}]}' \
                 > "$cfg"
             ;;
         config-effort)
             jq -n --arg m1 "$dm" --arg m2 "claude-sonnet-4-6" \
-                '{prompt: "unused", agents: [
-                    {count: 1, model: $m1, effort: "high"},
-                    {count: 1, model: $m2, effort: "high"}
+                '{prompt: "unused",
+                  providers: {
+                    anthropic_key: {kind: "anthropic", api_key: "$ANTHROPIC_API_KEY"}
+                  },
+                  agents: [
+                    {count: 1, model: $m1, provider: "anthropic_key", effort: "high"},
+                    {count: 1, model: $m2, provider: "anthropic_key", effort: "high"}
                 ]}' > "$cfg"
             ;;
         config-mixed-auth)
             jq -n --arg m "$dm" \
-                '{prompt: "unused", agents: [
-                    {count: 1, model: $m, auth: "apikey"},
-                    {count: 1, model: $m, auth: "oauth"}
+                '{prompt: "unused",
+                  providers: {
+                    anthropic_key: {kind: "anthropic", api_key: "$ANTHROPIC_API_KEY"},
+                    anthropic_oauth: {kind: "anthropic", oauth_token: "$CLAUDE_CODE_OAUTH_TOKEN"}
+                  },
+                  agents: [
+                    {count: 1, model: $m, provider: "anthropic_key"},
+                    {count: 1, model: $m, provider: "anthropic_oauth"}
                 ]}' > "$cfg"
             ;;
         config-context-none)
             jq -n --arg m "$dm" \
-                '{prompt: "unused", agents: [
-                    {count: 1, model: $m},
-                    {count: 1, model: $m, context: "none"}
+                '{prompt: "unused",
+                  providers: {
+                    anthropic_key: {kind: "anthropic", api_key: "$ANTHROPIC_API_KEY"}
+                  },
+                  agents: [
+                    {count: 1, model: $m, provider: "anthropic_key"},
+                    {count: 1, model: $m, provider: "anthropic_key", context: "none"}
                 ]}' > "$cfg"
             ;;
         config-context-slim)
             jq -n --arg m "$dm" \
-                '{prompt: "unused", agents: [
-                    {count: 1, model: $m},
-                    {count: 1, model: $m, context: "slim"}
+                '{prompt: "unused",
+                  providers: {
+                    anthropic_key: {kind: "anthropic", api_key: "$ANTHROPIC_API_KEY"}
+                  },
+                  agents: [
+                    {count: 1, model: $m, provider: "anthropic_key"},
+                    {count: 1, model: $m, provider: "anthropic_key", context: "slim"}
                 ]}' > "$cfg"
             ;;
         config-per-prompt)
             jq -n --arg m "$dm" \
                 --arg ap ".claude-swarm-smoke-alt.md" \
-                '{prompt: "unused", agents: [
-                    {count: 1, model: $m},
-                    {count: 1, model: $m, prompt: $ap}
+                '{prompt: "unused",
+                  providers: {
+                    anthropic_key: {kind: "anthropic", api_key: "$ANTHROPIC_API_KEY"}
+                  },
+                  agents: [
+                    {count: 1, model: $m, provider: "anthropic_key"},
+                    {count: 1, model: $m, provider: "anthropic_key", prompt: $ap}
                 ]}' > "$cfg"
             ;;
         "")
             jq -n --arg m "$dm" \
-                '{prompt: "unused", agents: [{count: '"$num_agents"', model: $m}]}' \
+                '{prompt: "unused",
+                  providers: {
+                    anthropic_key: {kind: "anthropic", api_key: "$ANTHROPIC_API_KEY"}
+                  },
+                  agents: [{count: '"$num_agents"', model: $m, provider: "anthropic_key"}]}' \
                 > "$cfg"
             ;;
         *)
             jq -n --arg m "$model_or_cfg" \
-                '{prompt: "unused", agents: [{count: '"$num_agents"', model: $m}]}' \
+                '{prompt: "unused",
+                  providers: {
+                    anthropic_key: {kind: "anthropic", api_key: "$ANTHROPIC_API_KEY"}
+                  },
+                  agents: [{count: '"$num_agents"', model: $m, provider: "anthropic_key"}]}' \
                 > "$cfg"
             ;;
     esac
@@ -309,7 +349,11 @@ cmd_oauth() {
     local cfg rc=0
     cfg=$(mktemp "/tmp/${PROJECT}-oauth.XXXXXX.json")
     jq -n --arg m "${SWARM_MODEL:-claude-opus-4-6}" \
-        '{prompt: "unused", agents: [{count: 1, model: $m, auth: "oauth"}]}' \
+        '{prompt: "unused",
+          providers: {
+            anthropic_oauth: {kind: "anthropic", oauth_token: "$CLAUDE_CODE_OAUTH_TOKEN"}
+          },
+          agents: [{count: 1, model: $m, provider: "anthropic_oauth"}]}' \
         > "$cfg"
     env ANTHROPIC_API_KEY="" \
         CLAUDE_CODE_OAUTH_TOKEN="${CLAUDE_CODE_OAUTH_TOKEN}" \
@@ -392,7 +436,11 @@ if [ -z "$CONFIG_FILE" ]; then
     CONFIG_FILE=$(mktemp "/tmp/${PROJECT}-test-default.XXXXXX.json")
     _AUTO_CONFIG="$CONFIG_FILE"
     jq -n --arg m "${SWARM_MODEL:-claude-opus-4-6}" \
-        '{prompt: "unused", agents: [{count: '"${SWARM_NUM_AGENTS:-2}"', model: $m}]}' \
+        '{prompt: "unused",
+          providers: {
+            anthropic_key: {kind: "anthropic", api_key: "$ANTHROPIC_API_KEY"}
+          },
+          agents: [{count: '"${SWARM_NUM_AGENTS:-2}"', model: $m, provider: "anthropic_key"}]}' \
         > "$CONFIG_FILE"
 fi
 NUM_AGENTS=$(jq '[.agents[].count] | add' "$CONFIG_FILE")

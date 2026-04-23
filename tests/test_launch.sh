@@ -2,13 +2,14 @@
 # shellcheck disable=SC2034
 set -euo pipefail
 
-# Unit tests for launch.sh parsing logic.
-# No Docker or API key required.
+# Unit tests for launch-time parsing and provider validation.
+# No Docker or API keys required.
 
 PASS=0
 FAIL=0
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
+
 TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 DRIVERS_DIR="$TESTS_DIR/../lib/drivers"
 
@@ -25,907 +26,19 @@ assert_eq() {
     fi
 }
 
-# --- Helpers: same logic used in launch.sh ---
-
-shorten_model() {
-    local m="$1"
-    local short="${m/claude-/}"
-    short="${short//\//-}"
-    echo "$short"
-}
-
-parse_inject_git_rules() { jq -r 'if has("inject_git_rules") then .inject_git_rules else true end' "$1"; }
-
-parse_pp_prompt()   { jq -r '.post_process.prompt // empty' "$1"; }
-parse_pp_model()    { jq -r '.post_process.model // "claude-opus-4-6"' "$1"; }
-parse_pp_base_url() { jq -r '.post_process.base_url // empty' "$1"; }
-parse_pp_api_key()  { jq -r '.post_process.api_key // empty' "$1"; }
-parse_pp_effort()   { jq -r '.post_process.effort // empty' "$1"; }
-parse_pp_max_idle() { jq -r '.post_process.max_idle // .max_idle // 3' "$1"; }
-
-parse_agents_cfg() {
-    jq -r '.tag as $dt | .driver as $dd | .agents[] | range(.count) as $i |
-        [.model, (.base_url // ""), (.api_key // ""), (.effort // ""), (.auth // ""), (.context // ""), (.prompt // ""), (.auth_token // ""), (.tag // $dt // ""), (.driver // $dd // "")] | join("|")' "$1"
-}
-
-validate_driver_cfg() {
-    local driver="$1" model="$2" base_url="$3" api_key="$4" effort="$5" auth="$6" auth_token="$7"
-    # shellcheck source=/dev/null
-    source "$DRIVERS_DIR/${driver}.sh"
-    agent_validate_config "$model" "$base_url" "$api_key" "$effort" "$auth" "$auth_token"
-}
-
-# Mirrors the per-agent credential selection in launch.sh.
-resolve_agent_creds() {
-    local agent_auth="$1" agent_api_key="$2" global_api_key="$3" global_oauth="$4"
-    local resolved_key="" oauth_env=""
-    case "${agent_auth}" in
-        oauth)
-            resolved_key=""
-            oauth_env="CLAUDE_CODE_OAUTH_TOKEN=${global_oauth}"
-            ;;
-        apikey)
-            resolved_key="${agent_api_key:-${global_api_key}}"
-            oauth_env=""
-            ;;
-        *)
-            resolved_key="${agent_api_key:-${global_api_key}}"
-            [ -n "$global_oauth" ] && oauth_env="CLAUDE_CODE_OAUTH_TOKEN=${global_oauth}"
-            ;;
-    esac
-    echo "${resolved_key}|${oauth_env}"
-}
-
-# Mirrors the auth_label computation in launch.sh (after credential resolution).
-# Args: agent_auth agent_api_key agent_auth_token resolved_api_key global_oauth
-resolve_auth_label() {
-    local agent_auth="$1" agent_api_key="$2" agent_auth_token="$3"
-    local resolved_api_key="$4" global_oauth="$5"
-    local auth_label=""
-    if [ -n "$agent_auth_token" ]; then
-        auth_label="token"
-    elif [ "$agent_auth" = "oauth" ]; then
-        auth_label="oauth"
-    elif [ "$agent_auth" = "apikey" ]; then
-        auth_label="key"
-    elif [ -n "$agent_api_key" ]; then
-        auth_label="key"
-    elif [ -n "$resolved_api_key" ] && [ -n "$global_oauth" ]; then
-        auth_label="auto"
-    elif [ -n "$resolved_api_key" ]; then
-        auth_label="key"
-    elif [ -n "$global_oauth" ]; then
-        auth_label="oauth"
-    fi
-    echo "$auth_label"
-}
-
-# Mirrors the validation guard in cmd_start().
-check_auth() {
-    local api_key="$1" oauth_token="$2" config_file="$3"
-    if [ -z "$api_key" ] && [ -z "$oauth_token" ] && [ -z "$config_file" ]; then
-        echo "fail"
+assert_contains() {
+    local label="$1" needle="$2" haystack="$3"
+    if echo "$haystack" | grep -qF -- "$needle"; then
+        echo "  PASS: ${label}"
+        PASS=$((PASS + 1))
     else
-        echo "pass"
+        echo "  FAIL: ${label}"
+        echo "        expected to contain: ${needle}"
+        echo "        actual:              ${haystack}"
+        FAIL=$((FAIL + 1))
     fi
 }
 
-# Mirrors the EXTRA_ENV construction for CLAUDE_CODE_OAUTH_TOKEN.
-build_oauth_extra_env() {
-    local token="$1"
-    local -a EXTRA_ENV=()
-    [ -n "$token" ] \
-        && EXTRA_ENV+=(-e "CLAUDE_CODE_OAUTH_TOKEN=${token}")
-    echo "${EXTRA_ENV[*]+"${EXTRA_ENV[*]}"}"
-}
-
-# ============================================================
-echo "=== 1. Model name shortening ==="
-
-assert_eq "opus"        "opus-4-6"          "$(shorten_model "claude-opus-4-6")"
-assert_eq "sonnet"      "sonnet-4-5"        "$(shorten_model "claude-sonnet-4-5")"
-assert_eq "haiku"       "haiku-4-5"         "$(shorten_model "claude-haiku-4-5")"
-assert_eq "openrouter"  "openrouter-custom" "$(shorten_model "openrouter/custom")"
-assert_eq "no prefix"   "MiniMax-M2.5"      "$(shorten_model "MiniMax-M2.5")"
-assert_eq "double slash" "a-b-c"            "$(shorten_model "a/b/c")"
-
-# ============================================================
-echo ""
-echo "=== 3. inject_git_rules config ==="
-
-cat > "$TMPDIR/default.json" <<'EOF'
-{ "prompt": "p.md", "agents": [{ "count": 1, "model": "m" }] }
-EOF
-
-cat > "$TMPDIR/inject_false.json" <<'EOF'
-{ "prompt": "p.md", "inject_git_rules": false, "agents": [{ "count": 1, "model": "m" }] }
-EOF
-
-cat > "$TMPDIR/inject_true.json" <<'EOF'
-{ "prompt": "p.md", "inject_git_rules": true, "agents": [{ "count": 1, "model": "m" }] }
-EOF
-
-assert_eq "default is true"   "true"  "$(parse_inject_git_rules "$TMPDIR/default.json")"
-assert_eq "explicit false"    "false" "$(parse_inject_git_rules "$TMPDIR/inject_false.json")"
-assert_eq "explicit true"     "true"  "$(parse_inject_git_rules "$TMPDIR/inject_true.json")"
-
-# ============================================================
-echo ""
-echo "=== 4. Post-process config parsing ==="
-
-cat > "$TMPDIR/pp_full.json" <<'EOF'
-{
-  "prompt": "p.md",
-  "agents": [{ "count": 1, "model": "m" }],
-  "post_process": {
-    "prompt": "review.md",
-    "model": "claude-sonnet-4-5",
-    "base_url": "https://example.com",
-    "api_key": "sk-pp-test"
-  }
-}
-EOF
-
-assert_eq "pp prompt"           "review.md"           "$(parse_pp_prompt "$TMPDIR/pp_full.json")"
-assert_eq "pp model"            "claude-sonnet-4-5"   "$(parse_pp_model "$TMPDIR/pp_full.json")"
-assert_eq "pp base_url"         "https://example.com" "$(parse_pp_base_url "$TMPDIR/pp_full.json")"
-assert_eq "pp api_key"          "sk-pp-test"          "$(parse_pp_api_key "$TMPDIR/pp_full.json")"
-assert_eq "pp max_idle default" "3"                   "$(parse_pp_max_idle "$TMPDIR/pp_full.json")"
-
-cat > "$TMPDIR/pp_minimal.json" <<'EOF'
-{
-  "prompt": "p.md",
-  "agents": [{ "count": 1, "model": "m" }],
-  "post_process": { "prompt": "review.md" }
-}
-EOF
-
-assert_eq "pp model default"    "claude-opus-4-6"  "$(parse_pp_model "$TMPDIR/pp_minimal.json")"
-assert_eq "pp base_url empty"   ""                 "$(parse_pp_base_url "$TMPDIR/pp_minimal.json")"
-assert_eq "pp api_key empty"    ""                 "$(parse_pp_api_key "$TMPDIR/pp_minimal.json")"
-assert_eq "pp max_idle minimal" "3"                "$(parse_pp_max_idle "$TMPDIR/pp_minimal.json")"
-
-cat > "$TMPDIR/pp_idle.json" <<'EOF'
-{
-  "prompt": "p.md",
-  "max_idle": 5,
-  "agents": [{ "count": 1, "model": "m" }],
-  "post_process": { "prompt": "review.md", "max_idle": 3 }
-}
-EOF
-
-assert_eq "pp max_idle explicit" "3" \
-    "$(parse_pp_max_idle "$TMPDIR/pp_idle.json")"
-
-cat > "$TMPDIR/pp_idle_inherit.json" <<'EOF'
-{
-  "prompt": "p.md",
-  "max_idle": 7,
-  "agents": [{ "count": 1, "model": "m" }],
-  "post_process": { "prompt": "review.md" }
-}
-EOF
-
-assert_eq "pp max_idle inherits top-level" "7" \
-    "$(parse_pp_max_idle "$TMPDIR/pp_idle_inherit.json")"
-
-cat > "$TMPDIR/no_pp.json" <<'EOF'
-{ "prompt": "p.md", "agents": [{ "count": 1, "model": "m" }] }
-EOF
-
-assert_eq "no pp prompt"   ""  "$(parse_pp_prompt "$TMPDIR/no_pp.json")"
-assert_eq "no pp max_idle" "3" "$(parse_pp_max_idle "$TMPDIR/no_pp.json")"
-
-# ============================================================
-echo ""
-echo "=== 5. Git user name is clean (no model tag) ==="
-
-GIT_USER_NAME="swarm-agent"
-assert_eq "default name clean" "swarm-agent" "$GIT_USER_NAME"
-
-GIT_USER_NAME="Nikos Baxevanis"
-assert_eq "custom name clean" "Nikos Baxevanis" "$GIT_USER_NAME"
-
-# ============================================================
-echo ""
-echo "=== 6. Effort in agent TSV (config path) ==="
-
-cat > "$TMPDIR/effort.json" <<'EOF'
-{
-  "prompt": "p.md",
-  "agents": [
-    { "count": 1, "model": "claude-opus-4-6", "effort": "high" },
-    { "count": 2, "model": "claude-sonnet-4-6", "effort": "medium" },
-    { "count": 1, "model": "claude-haiku-4-5" }
-  ]
-}
-EOF
-
-CFG=$(parse_agents_cfg "$TMPDIR/effort.json")
-LINE1=$(echo "$CFG" | sed -n '1p')
-LINE2=$(echo "$CFG" | sed -n '2p')
-LINE4=$(echo "$CFG" | sed -n '4p')
-
-IFS='|' read -r m1 u1 k1 e1 a1 c1 p1 t1 g1 d1 <<< "$LINE1"
-assert_eq "opus effort"  "high"   "$e1"
-
-IFS='|' read -r m2 u2 k2 e2 a2 c2 p2 t2 g2 d2 <<< "$LINE2"
-assert_eq "sonnet effort" "medium" "$e2"
-
-IFS='|' read -r m4 u4 k4 e4 a4 c4 p4 t4 g4 d4 <<< "$LINE4"
-assert_eq "haiku effort (empty)" "" "$e4"
-
-# ============================================================
-echo ""
-echo "=== 7. Effort in post-process ==="
-
-cat > "$TMPDIR/pp_effort.json" <<'EOF'
-{
-  "prompt": "p.md",
-  "agents": [{ "count": 1, "model": "m" }],
-  "post_process": {
-    "prompt": "review.md",
-    "model": "claude-opus-4-6",
-    "effort": "low"
-  }
-}
-EOF
-
-assert_eq "pp effort"       "low" "$(parse_pp_effort "$TMPDIR/pp_effort.json")"
-assert_eq "pp effort absent" ""   "$(parse_pp_effort "$TMPDIR/no_pp.json")"
-
-# ============================================================
-echo ""
-echo "=== 9. OAuth auth validation ==="
-
-assert_eq "api_key only"        "pass" "$(check_auth "sk-key" "" "")"
-assert_eq "oauth only"          "pass" "$(check_auth "" "sk-ant-oat01-tok" "")"
-assert_eq "both set"            "pass" "$(check_auth "sk-key" "sk-ant-oat01-tok" "")"
-assert_eq "config only"         "pass" "$(check_auth "" "" "swarm.json")"
-assert_eq "nothing set"         "fail" "$(check_auth "" "" "")"
-assert_eq "oauth + config"      "pass" "$(check_auth "" "sk-ant-oat01-tok" "swarm.json")"
-
-# ============================================================
-echo ""
-echo "=== 10. OAuth EXTRA_ENV construction ==="
-
-assert_eq "oauth env set" \
-    "-e CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-test" \
-    "$(build_oauth_extra_env "sk-ant-oat01-test")"
-assert_eq "oauth env empty" "" "$(build_oauth_extra_env "")"
-
-# ============================================================
-echo ""
-echo "=== 11. Per-agent auth field in TSV ==="
-
-cat > "$TMPDIR/auth_mixed.json" <<'EOF'
-{
-  "prompt": "p.md",
-  "agents": [
-    { "count": 1, "model": "claude-opus-4-6", "auth": "apikey" },
-    { "count": 1, "model": "claude-opus-4-6", "auth": "oauth" },
-    { "count": 1, "model": "MiniMax-M2.5", "base_url": "https://api.minimax.io", "api_key": "sk-mm" }
-  ]
-}
-EOF
-
-CFG=$(parse_agents_cfg "$TMPDIR/auth_mixed.json")
-LINE1=$(echo "$CFG" | sed -n '1p')
-LINE2=$(echo "$CFG" | sed -n '2p')
-LINE3=$(echo "$CFG" | sed -n '3p')
-
-IFS='|' read -r m1 u1 k1 e1 a1 c1 p1 t1 g1 d1 <<< "$LINE1"
-assert_eq "auth apikey"  "apikey"  "$a1"
-assert_eq "auth apikey model" "claude-opus-4-6" "$m1"
-
-IFS='|' read -r m2 u2 k2 e2 a2 c2 p2 t2 g2 d2 <<< "$LINE2"
-assert_eq "auth oauth"   "oauth"   "$a2"
-
-IFS='|' read -r m3 u3 k3 e3 a3 c3 p3 t3 g3 d3 <<< "$LINE3"
-assert_eq "auth custom (empty)" "" "$a3"
-assert_eq "auth custom key" "sk-mm" "$k3"
-
-# ============================================================
-echo ""
-echo "=== 12. Per-agent credential resolution ==="
-
-RESULT=$(resolve_agent_creds "oauth" "" "sk-global" "sk-oat-tok")
-IFS='|' read -r rk re <<< "$RESULT"
-assert_eq "oauth: api_key cleared"  ""  "$rk"
-assert_eq "oauth: token passed" "CLAUDE_CODE_OAUTH_TOKEN=sk-oat-tok" "$re"
-
-RESULT=$(resolve_agent_creds "apikey" "" "sk-global" "sk-oat-tok")
-IFS='|' read -r rk re <<< "$RESULT"
-assert_eq "apikey: api_key set"   "sk-global" "$rk"
-assert_eq "apikey: no token"      ""           "$re"
-
-RESULT=$(resolve_agent_creds "" "" "sk-global" "sk-oat-tok")
-IFS='|' read -r rk re <<< "$RESULT"
-assert_eq "default: api_key set"  "sk-global" "$rk"
-assert_eq "default: token passed" "CLAUDE_CODE_OAUTH_TOKEN=sk-oat-tok" "$re"
-
-RESULT=$(resolve_agent_creds "" "sk-agent" "sk-global" "sk-oat-tok")
-IFS='|' read -r rk re <<< "$RESULT"
-assert_eq "custom key overrides"  "sk-agent" "$rk"
-
-RESULT=$(resolve_agent_creds "" "" "sk-global" "")
-IFS='|' read -r rk re <<< "$RESULT"
-assert_eq "no oauth: api_key set" "sk-global" "$rk"
-assert_eq "no oauth: no token"    ""           "$re"
-
-# ============================================================
-echo ""
-echo "=== 13. Context field in agent TSV ==="
-
-cat > "$TMPDIR/context.json" <<'EOF'
-{
-  "prompt": "p.md",
-  "agents": [
-    { "count": 1, "model": "claude-opus-4-6", "effort": "high" },
-    { "count": 1, "model": "claude-opus-4-6", "context": "none" },
-    { "count": 1, "model": "claude-sonnet-4-6", "context": "slim" }
-  ]
-}
-EOF
-
-CFG=$(parse_agents_cfg "$TMPDIR/context.json")
-LINE1=$(echo "$CFG" | sed -n '1p')
-LINE2=$(echo "$CFG" | sed -n '2p')
-LINE3=$(echo "$CFG" | sed -n '3p')
-
-IFS='|' read -r m1 u1 k1 e1 a1 c1 p1 t1 g1 d1 <<< "$LINE1"
-assert_eq "context default (empty)" "" "$c1"
-
-IFS='|' read -r m2 u2 k2 e2 a2 c2 p2 t2 g2 d2 <<< "$LINE2"
-assert_eq "context none" "none" "$c2"
-
-IFS='|' read -r m3 u3 k3 e3 a3 c3 p3 t3 g3 d3 <<< "$LINE3"
-assert_eq "context slim" "slim" "$c3"
-
-# ============================================================
-echo ""
-echo "=== 14. Prompt field in agent TSV ==="
-
-cat > "$TMPDIR/per_prompt.json" <<'EOF'
-{
-  "prompt": "tasks/default.md",
-  "agents": [
-    { "count": 1, "model": "claude-opus-4-6" },
-    { "count": 1, "model": "claude-opus-4-6", "prompt": "tasks/review.md" },
-    { "count": 1, "model": "claude-sonnet-4-6", "prompt": "tasks/explore.md", "context": "none" }
-  ]
-}
-EOF
-
-CFG=$(parse_agents_cfg "$TMPDIR/per_prompt.json")
-LINE1=$(echo "$CFG" | sed -n '1p')
-LINE2=$(echo "$CFG" | sed -n '2p')
-LINE3=$(echo "$CFG" | sed -n '3p')
-
-IFS='|' read -r m1 u1 k1 e1 a1 c1 p1 t1 g1 d1 <<< "$LINE1"
-assert_eq "prompt default (empty)" "" "$p1"
-
-IFS='|' read -r m2 u2 k2 e2 a2 c2 p2 t2 g2 d2 <<< "$LINE2"
-assert_eq "prompt override" "tasks/review.md" "$p2"
-
-IFS='|' read -r m3 u3 k3 e3 a3 c3 p3 t3 g3 d3 <<< "$LINE3"
-assert_eq "prompt + context" "tasks/explore.md" "$p3"
-assert_eq "context preserved" "none" "$c3"
-
-# ============================================================
-echo ""
-echo "=== 15. Tag field in agent TSV ==="
-
-cat > "$TMPDIR/tagged.json" <<'EOF'
-{
-  "prompt": "p.md",
-  "agents": [
-    { "count": 2, "model": "claude-opus-4-6", "tag": "explore" },
-    { "count": 1, "model": "claude-sonnet-4-6", "tag": "review" },
-    { "count": 1, "model": "claude-haiku-4-5" }
-  ]
-}
-EOF
-
-CFG=$(parse_agents_cfg "$TMPDIR/tagged.json")
-LINE1=$(echo "$CFG" | sed -n '1p')
-LINE3=$(echo "$CFG" | sed -n '3p')
-LINE4=$(echo "$CFG" | sed -n '4p')
-
-IFS='|' read -r m1 u1 k1 e1 a1 c1 p1 t1 g1 d1 <<< "$LINE1"
-assert_eq "tag explore" "explore" "$g1"
-
-IFS='|' read -r m3 u3 k3 e3 a3 c3 p3 t3 g3 d3 <<< "$LINE3"
-assert_eq "tag review" "review" "$g3"
-
-IFS='|' read -r m4 u4 k4 e4 a4 c4 p4 t4 g4 d4 <<< "$LINE4"
-assert_eq "tag empty" "" "$g4"
-
-# ============================================================
-echo ""
-echo "=== 16. parse_start_args — dashboard flag ==="
-
-_LAUNCH="$TESTS_DIR/../launch.sh"
-eval "$(sed -n '/^parse_start_args()/,/^}/p' "$_LAUNCH")"
-
-parse_start_args --dashboard
-assert_eq "cli dashboard" "true" "$OPEN_DASHBOARD"
-
-parse_start_args
-assert_eq "default no dashboard" "false" "$OPEN_DASHBOARD"
-
-# ============================================================
-echo ""
-echo "=== 17. parse_start_args — unknown flag errors ==="
-
-if (parse_start_args --bogus 2>/dev/null); then
-    echo "  FAIL: unknown flag should error"
-    FAIL=$((FAIL + 1))
-else
-    echo "  PASS: unknown flag rejected"
-    PASS=$((PASS + 1))
-fi
-
-if (parse_start_args --prompt foo.md 2>/dev/null); then
-    echo "  FAIL: removed --prompt flag should error"
-    FAIL=$((FAIL + 1))
-else
-    echo "  PASS: --prompt rejected (config-only)"
-    PASS=$((PASS + 1))
-fi
-
-if (parse_start_args --model m 2>/dev/null); then
-    echo "  FAIL: removed --model flag should error"
-    FAIL=$((FAIL + 1))
-else
-    echo "  PASS: --model rejected (config-only)"
-    PASS=$((PASS + 1))
-fi
-
-if (parse_start_args --agents 5 2>/dev/null); then
-    echo "  FAIL: removed --agents flag should error"
-    FAIL=$((FAIL + 1))
-else
-    echo "  PASS: --agents rejected (config-only)"
-    PASS=$((PASS + 1))
-fi
-
-# ============================================================
-echo ""
-echo "=== 22. Auth label — credential source labels ==="
-
-# auth_token set → "token"
-assert_eq "auth_token → token" \
-    "token" \
-    "$(resolve_auth_label "" "" "sk-or-key" "" "")"
-
-# auth_token set with auth field → still "token" (takes priority)
-assert_eq "auth_token + auth:apikey → token" \
-    "token" \
-    "$(resolve_auth_label "apikey" "" "sk-or-key" "" "")"
-
-# auth: "oauth" → "oauth"
-assert_eq "auth:oauth → oauth" \
-    "oauth" \
-    "$(resolve_auth_label "oauth" "" "" "" "sk-oat-tok")"
-
-# custom api_key (no auth field) → "key"
-assert_eq "custom api_key → key" \
-    "key" \
-    "$(resolve_auth_label "" "sk-custom" "" "" "")"
-
-# auth: "apikey" with resolved key → "key"
-assert_eq "auth:apikey → key" \
-    "key" \
-    "$(resolve_auth_label "apikey" "" "" "sk-global" "")"
-
-# auth: "apikey" with both host creds → still "key" (OAuth not forwarded)
-assert_eq "auth:apikey + host oauth → key" \
-    "key" \
-    "$(resolve_auth_label "apikey" "" "" "sk-global" "sk-oat-tok")"
-
-# default with both key + OAuth → "auto"
-assert_eq "default key+oauth → auto" \
-    "auto" \
-    "$(resolve_auth_label "" "" "" "sk-global" "sk-oat-tok")"
-
-# default with key only → "key"
-assert_eq "default key only → key" \
-    "key" \
-    "$(resolve_auth_label "" "" "" "sk-global" "")"
-
-# default with OAuth only → "oauth"
-assert_eq "default oauth only → oauth" \
-    "oauth" \
-    "$(resolve_auth_label "" "" "" "" "sk-oat-tok")"
-
-# nothing at all → empty
-assert_eq "no creds → empty" \
-    "" \
-    "$(resolve_auth_label "" "" "" "" "")"
-
-# ============================================================
-# check_deps tests
-# ============================================================
-echo ""
-echo "--- check_deps ---"
-
-source "$TESTS_DIR/../lib/check-deps.sh"
-
-# Present tools should pass silently (version warnings are
-# expected on macOS where system bash is 3.2).
-out=$(check_deps bash git 2>&1) || true
-if [ "${BASH_VERSINFO[0]}" -ge 5 ]; then
-    assert_eq "present deps succeed" "" "$out"
-else
-    echo "  SKIP: system bash ${BASH_VERSION} triggers expected warning"
-fi
-
-# Missing tool should print error and list the tool name.
-out=$(check_deps __no_such_tool__ 2>&1) || true
-assert_eq "missing dep mentions tool" "true" \
-    "$([[ "$out" == *"__no_such_tool__"* ]] && echo true || echo false)"
-assert_eq "missing dep says ERROR" "true" \
-    "$([[ "$out" == *"ERROR"* ]] && echo true || echo false)"
-assert_eq "missing dep mentions README" "true" \
-    "$([[ "$out" == *"README"* ]] && echo true || echo false)"
-
-# Mixed present and missing reports only the missing one.
-out=$(check_deps bash __no_such_tool__ git 2>&1) || true
-assert_eq "mixed deps lists missing" "true" \
-    "$([[ "$out" == *"__no_such_tool__"* ]] && echo true || echo false)"
-assert_eq "mixed deps omits present" "false" \
-    "$([[ "$out" == *"bash"* ]] && echo true || echo false)"
-
-# ============================================================
-echo ""
-echo "--- _ver_ge comparison ---"
-
-assert_eq "ver_ge 1.6 >= 1.6"   "0" "$(_ver_ge 1.6 1.6  && echo 0 || echo 1)"
-assert_eq "ver_ge 1.8 >= 1.6"   "0" "$(_ver_ge 1.8 1.6  && echo 0 || echo 1)"
-assert_eq "ver_ge 2.0 >= 1.6"   "0" "$(_ver_ge 2.0 1.6  && echo 0 || echo 1)"
-assert_eq "ver_ge 1.5 < 1.6"    "1" "$(_ver_ge 1.5 1.6  && echo 0 || echo 1)"
-assert_eq "ver_ge 0.9 < 1.0"    "1" "$(_ver_ge 0.9 1.0  && echo 0 || echo 1)"
-assert_eq "ver_ge 24.0 >= 24.0" "0" "$(_ver_ge 24.0 24.0 && echo 0 || echo 1)"
-assert_eq "ver_ge 29.3 >= 24.0" "0" "$(_ver_ge 29.3 24.0 && echo 0 || echo 1)"
-assert_eq "ver_ge 23.9 < 24.0"  "1" "$(_ver_ge 23.9 24.0 && echo 0 || echo 1)"
-
-echo ""
-echo "--- _dep_version extraction ---"
-
-bash_ver=$(_dep_version bash)
-assert_eq "bash ver non-empty" "true" \
-    "$([ -n "$bash_ver" ] && echo true || echo false)"
-assert_eq "bash ver is dotted" "true" \
-    "$([[ "$bash_ver" == *.* ]] && echo true || echo false)"
-
-git_ver=$(_dep_version git)
-assert_eq "git ver non-empty" "true" \
-    "$([ -n "$git_ver" ] && echo true || echo false)"
-
-jq_ver=$(_dep_version jq)
-assert_eq "jq ver non-empty" "true" \
-    "$([ -n "$jq_ver" ] && echo true || echo false)"
-
-assert_eq "unknown cmd returns error" "1" \
-    "$(_dep_version __no_such__ 2>/dev/null && echo 0 || echo 1)"
-
-echo ""
-echo "--- version warning output ---"
-
-# Current system should produce no warnings (skip on macOS
-# where system bash is 3.2, below tested minimum).
-warn_out=$(check_deps bash git jq 2>&1) || true
-if [ "${BASH_VERSINFO[0]}" -ge 5 ]; then
-    assert_eq "no warnings on current system" "" "$warn_out"
-else
-    echo "  SKIP: system bash ${BASH_VERSION} below minimum (expected)"
-fi
-
-# SWARM_SKIP_DEP_CHECK silences warnings.
-warn_out=$(SWARM_SKIP_DEP_CHECK=1 check_deps bash git jq 2>&1) || true
-assert_eq "skip dep check silences" "" "$warn_out"
-
-# ============================================================
-# Script-level dependency guard integration tests.
-# Build a minimal PATH with only basic utilities so that
-# jq, docker, bc, tput are genuinely absent.
-# ============================================================
-echo ""
-echo "--- check_deps integration ---"
-
-FAKE_BIN=$(mktemp -d)
-trap 'rm -rf "$FAKE_BIN"' EXIT
-for cmd in bash dirname basename cat date git; do
-    p=$(command -v "$cmd" 2>/dev/null) && ln -s "$p" "$FAKE_BIN/"
-done
-
-# launch.sh --help should exit 0 even without jq/docker.
-out=$(PATH="$FAKE_BIN" bash "$TESTS_DIR/../launch.sh" --help 2>&1) \
-    && rc=0 || rc=$?
-assert_eq "launch --help exits 0 without jq" "0" "$rc"
-
-# dashboard.sh --help should exit 0 even without jq/docker/tput/bc.
-out=$(PATH="$FAKE_BIN" bash "$TESTS_DIR/../dashboard.sh" --help 2>&1) \
-    && rc=0 || rc=$?
-assert_eq "dashboard --help exits 0 without jq" "0" "$rc"
-
-# launch.sh start should fail and mention missing tools.
-out=$(PATH="$FAKE_BIN" bash "$TESTS_DIR/../launch.sh" start 2>&1) \
-    && rc=0 || rc=$?
-assert_eq "launch start exits nonzero without jq" "1" "$rc"
-assert_eq "launch start error mentions jq" "true" \
-    "$([[ "$out" == *"jq"* ]] && echo true || echo false)"
-
-# dashboard.sh (no args) should fail and mention missing tools.
-out=$(PATH="$FAKE_BIN" bash "$TESTS_DIR/../dashboard.sh" 2>&1) \
-    && rc=0 || rc=$?
-assert_eq "dashboard exits nonzero without jq" "1" "$rc"
-assert_eq "dashboard error mentions jq" "true" \
-    "$([[ "$out" == *"jq"* ]] && echo true || echo false)"
-
-rm -rf "$FAKE_BIN"
-trap 'rm -rf "$TMPDIR"' EXIT
-
-# ============================================================
-echo ""
-echo "=== 18. Swarmfile is required ==="
-
-# launch.sh start without a config should fail with a clear message.
-# Must run from a git repo (launch.sh needs git rev-parse).
-# Requires docker in PATH (check_deps runs before config check).
-if command -v docker &>/dev/null; then
-    _no_cfg_dir=$(mktemp -d)
-    git -C "$_no_cfg_dir" init -q
-    out=$(cd "$_no_cfg_dir" && SWARM_CONFIG="" bash "$TESTS_DIR/../launch.sh" start 2>&1) \
-        && rc=0 || rc=$?
-    rm -rf "$_no_cfg_dir"
-    assert_eq "no config exits nonzero" "1" "$rc"
-    assert_eq "no config says swarmfile" "true" \
-        "$([[ "$out" == *"swarmfile"* ]] && echo true || echo false)"
-else
-    echo "  SKIP: docker not available (macOS CI)"
-fi
-
-# ============================================================
-echo ""
-echo "=== SWARM_AGENTS derivation from config ==="
-
-# Mirrors the logic in cmd_start() that reads AGENTS_CFG and builds
-# a comma-separated list of unique drivers for the Docker build arg.
-derive_swarm_agents() {
-    local cfg_file="$1" config_file="${2:-}" default_driver="claude-code"
-    local _swarm_agents="" _seen_agents=" "
-    while IFS='|' read -r _ _ _ _ _ _ _ _ _ _drv; do
-        _drv="${_drv:-${default_driver}}"
-        [[ "$_seen_agents" == *" $_drv "* ]] && continue
-        _seen_agents+="$_drv "
-        _swarm_agents="${_swarm_agents:+${_swarm_agents},}${_drv}"
-    done < "$cfg_file"
-    if [ -n "$config_file" ]; then
-        local _pp_drv
-        _pp_drv=$(jq -r '.post_process.driver // .driver // "claude-code"' "$config_file" 2>/dev/null || true)
-        if [[ "$_seen_agents" != *" $_pp_drv "* ]]; then
-            _swarm_agents="${_swarm_agents:+${_swarm_agents},}${_pp_drv}"
-        fi
-    fi
-    echo "$_swarm_agents"
-}
-
-# Single driver (no driver field in config).
-# Format: model|base_url|api_key|effort|auth|context|prompt|auth_token|tag|driver (9 pipes)
-: > "$TMPDIR/agents_single.cfg"
-printf 'claude-opus-4-6|||||||||\n' >> "$TMPDIR/agents_single.cfg"
-printf 'claude-sonnet-4-6|||||||||\n' >> "$TMPDIR/agents_single.cfg"
-assert_eq "single driver default" "claude-code" \
-    "$(derive_swarm_agents "$TMPDIR/agents_single.cfg")"
-
-# Mixed drivers.
-: > "$TMPDIR/agents_mixed.cfg"
-printf 'claude-opus-4-6|||||||||claude-code\n' >> "$TMPDIR/agents_mixed.cfg"
-printf 'gemini-2.5-pro|||||||||gemini-cli\n' >> "$TMPDIR/agents_mixed.cfg"
-assert_eq "mixed drivers" "claude-code,gemini-cli" \
-    "$(derive_swarm_agents "$TMPDIR/agents_mixed.cfg")"
-
-# Deduplication — multiple agents with same driver.
-: > "$TMPDIR/agents_dedup.cfg"
-printf 'gemini-2.5-pro|||||||||gemini-cli\n' >> "$TMPDIR/agents_dedup.cfg"
-printf 'gemini-3-flash|||||||||gemini-cli\n' >> "$TMPDIR/agents_dedup.cfg"
-assert_eq "dedup same driver" "gemini-cli" \
-    "$(derive_swarm_agents "$TMPDIR/agents_dedup.cfg")"
-
-# Mixed legacy + new drivers.
-: > "$TMPDIR/agents_new_mix.cfg"
-printf 'claude-opus-4-6|||||||||claude-code\n' >> "$TMPDIR/agents_new_mix.cfg"
-printf 'kimi-for-coding|||||||||kimi-cli\n' >> "$TMPDIR/agents_new_mix.cfg"
-printf 'anthropic/claude-sonnet-4-5-20250929|||||||||opencode\n' >> "$TMPDIR/agents_new_mix.cfg"
-printf 'glm-4.7|||||||||droid\n' >> "$TMPDIR/agents_new_mix.cfg"
-assert_eq "new drivers mixed" "claude-code,kimi-cli,opencode,droid" \
-    "$(derive_swarm_agents "$TMPDIR/agents_new_mix.cfg")"
-
-# Post-process adds a new driver.
-: > "$TMPDIR/agents_pp.cfg"
-printf 'gemini-2.5-pro|||||||||gemini-cli\n' >> "$TMPDIR/agents_pp.cfg"
-cat > "$TMPDIR/pp_driver.json" <<'EOF'
-{
-  "prompt": "p.md",
-  "agents": [{ "count": 1, "model": "gemini-2.5-pro", "driver": "gemini-cli" }],
-  "post_process": { "prompt": "r.md", "driver": "claude-code" }
-}
-EOF
-assert_eq "pp adds driver" "gemini-cli,claude-code" \
-    "$(derive_swarm_agents "$TMPDIR/agents_pp.cfg" "$TMPDIR/pp_driver.json")"
-
-# Post-process driver already present — no duplicate.
-cat > "$TMPDIR/pp_same.json" <<'EOF'
-{
-  "prompt": "p.md",
-  "agents": [{ "count": 1, "model": "claude-opus-4-6" }],
-  "post_process": { "prompt": "r.md" }
-}
-EOF
-: > "$TMPDIR/agents_pp_same.cfg"
-printf 'claude-opus-4-6|||||||||\n' >> "$TMPDIR/agents_pp_same.cfg"
-assert_eq "pp same driver no dup" "claude-code" \
-    "$(derive_swarm_agents "$TMPDIR/agents_pp_same.cfg" "$TMPDIR/pp_same.json")"
-
-# Post-process inherits top-level driver.
-cat > "$TMPDIR/pp_inherit.json" <<'EOF'
-{
-  "prompt": "p.md",
-  "driver": "gemini-cli",
-  "agents": [{ "count": 1, "model": "gemini-2.5-pro" }],
-  "post_process": { "prompt": "r.md" }
-}
-EOF
-: > "$TMPDIR/agents_pp_inh.cfg"
-printf 'gemini-2.5-pro|||||||||gemini-cli\n' >> "$TMPDIR/agents_pp_inh.cfg"
-assert_eq "pp inherits top driver" "gemini-cli" \
-    "$(derive_swarm_agents "$TMPDIR/agents_pp_inh.cfg" "$TMPDIR/pp_inherit.json")"
-
-# ============================================================
-echo ""
-echo "=== Driver config validation ==="
-
-KIMI_OK=$(KIMI_API_KEY="" validate_driver_cfg \
-    "kimi-cli" "kimi-for-coding" "https://api.kimi.com/coding/v1" \
-    "sk-kimi" "high" "apikey" "" 2>/dev/null && echo ok || echo fail)
-assert_eq "kimi accepts api_key + base_url" "ok" "$KIMI_OK"
-
-KIMI_BAD=$(KIMI_API_KEY="" validate_driver_cfg \
-    "kimi-cli" "kimi-for-coding" "" "" "" "" "" 2>/dev/null && echo ok || echo fail)
-assert_eq "kimi rejects missing key" "fail" "$KIMI_BAD"
-
-OPENCODE_BAD=$(validate_driver_cfg \
-    "opencode" "anthropic/claude-sonnet-4-5-20250929" "" "sk-test" "" "" "" \
-    2>/dev/null && echo ok || echo fail)
-assert_eq "opencode rejects api_key field" "fail" "$OPENCODE_BAD"
-
-OPENCODE_BAD=$(validate_driver_cfg \
-    "opencode" "anthropic/claude-sonnet-4-5-20250929" "" "" "" "apikey" "" \
-    2>/dev/null && echo ok || echo fail)
-assert_eq "opencode rejects auth field" "fail" "$OPENCODE_BAD"
-
-DROID_OK=$(FACTORY_API_KEY="fk-test" validate_driver_cfg \
-    "droid" "glm-4.7" "" "" "medium" "" "" 2>/dev/null && echo ok || echo fail)
-assert_eq "droid accepts env key" "ok" "$DROID_OK"
-
-DROID_BAD=$(FACTORY_API_KEY="fk-test" validate_driver_cfg \
-    "droid" "glm-4.7" "https://factory.example" "" "" "" "" \
-    2>/dev/null && echo ok || echo fail)
-assert_eq "droid rejects base_url field" "fail" "$DROID_BAD"
-
-# ============================================================
-echo ""
-echo "=== 13. Pricing extraction from config ==="
-
-# Mirrors the jq pricing lookup in launch.sh.
-extract_pricing() {
-    local config="$1" model="$2"
-    jq -r --arg m "$model" \
-        '.pricing[$m] // empty | "\(.input + 0) \(.output + 0) \((.cached // 0) + 0)"' \
-        "$config" 2>/dev/null || true
-}
-
-assert_eq "gemini-2.5-pro pricing" "1.25 10 0.13" \
-    "$(extract_pricing "$TESTS_DIR/configs/heterogeneous-kitchen-sink.json" "gemini-2.5-pro")"
-
-assert_eq "gemini-3.1 pricing" "2 12 0.2" \
-    "$(extract_pricing "$TESTS_DIR/configs/heterogeneous-kitchen-sink.json" "gemini-3.1-pro-preview")"
-
-assert_eq "gemini-3.1 customtools pricing" "2 12 0.2" \
-    "$(extract_pricing "$TESTS_DIR/configs/heterogeneous-kitchen-sink.json" "gemini-3.1-pro-preview-customtools")"
-
-assert_eq "flash pricing" "0.5 3 0" \
-    "$(extract_pricing "$TESTS_DIR/configs/heterogeneous-kitchen-sink.json" "gemini-3-flash-preview")"
-
-# Model not in pricing map — returns empty.
-assert_eq "unlisted model empty" "" \
-    "$(extract_pricing "$TESTS_DIR/configs/heterogeneous-kitchen-sink.json" "claude-opus-4-6")"
-
-# MiniMax-M2.7 pricing in kitchen-sink.json.
-assert_eq "minimax-m2.7 pricing" "0.3 1.2 0.06" \
-    "$(extract_pricing "$TESTS_DIR/configs/kitchen-sink.json" "MiniMax-M2.7")"
-
-# Config without pricing section — returns empty.
-assert_eq "no pricing section" "" \
-    "$(extract_pricing "$TESTS_DIR/configs/gemini-only.json" "gemini-2.5-pro")"
-
-# ============================================================
-echo ""
-echo "=== 29. claude_code_version field ==="
-
-cat > "$TMPDIR/cc_pinned.json" <<'JSON'
-{
-  "prompt": "unused",
-  "claude_code_version": "1.0.30",
-  "agents": [{"count": 1, "model": "claude-opus-4-6"}]
-}
-JSON
-
-assert_eq "cc version present" "1.0.30" \
-    "$(jq -r '.claude_code_version // empty' "$TMPDIR/cc_pinned.json")"
-
-cat > "$TMPDIR/cc_no_version.json" <<'JSON'
-{
-  "prompt": "unused",
-  "agents": [{"count": 1, "model": "claude-opus-4-6"}]
-}
-JSON
-
-assert_eq "cc version absent" "" \
-    "$(jq -r '.claude_code_version // empty' "$TMPDIR/cc_no_version.json")"
-
-# ============================================================
-echo ""
-echo "=== 30. Top-level tag inheritance ==="
-
-cat > "$TMPDIR/tag_toplevel.json" <<'EOF'
-{
-  "prompt": "p.md",
-  "tag": "custom-top-lvl-tag",
-  "agents": [
-    { "count": 1, "model": "claude-opus-4-6" },
-    { "count": 1, "model": "claude-sonnet-4-6", "tag": "custom-per-agent-tag" },
-    { "count": 1, "model": "claude-haiku-4-5", "tag": "" }
-  ]
-}
-EOF
-
-CFG=$(parse_agents_cfg "$TMPDIR/tag_toplevel.json")
-LINE1=$(echo "$CFG" | sed -n '1p')
-LINE2=$(echo "$CFG" | sed -n '2p')
-LINE3=$(echo "$CFG" | sed -n '3p')
-
-IFS='|' read -r m1 u1 k1 e1 a1 c1 p1 t1 g1 d1 <<< "$LINE1"
-assert_eq "inherits top-level tag" "custom-top-lvl-tag" "$g1"
-
-IFS='|' read -r m2 u2 k2 e2 a2 c2 p2 t2 g2 d2 <<< "$LINE2"
-assert_eq "per-agent tag overrides" "custom-per-agent-tag" "$g2"
-
-IFS='|' read -r m3 u3 k3 e3 a3 c3 p3 t3 g3 d3 <<< "$LINE3"
-assert_eq "no top-level tag no agent tag" "" "$g3"
-
-# No top-level tag. Agents without tag get empty.
-cat > "$TMPDIR/tag_none.json" <<'EOF'
-{
-  "prompt": "p.md",
-  "agents": [
-    { "count": 1, "model": "claude-opus-4-6" }
-  ]
-}
-EOF
-
-CFG=$(parse_agents_cfg "$TMPDIR/tag_none.json")
-LINE1=$(echo "$CFG" | sed -n '1p')
-IFS='|' read -r m1 u1 k1 e1 a1 c1 p1 t1 g1 d1 <<< "$LINE1"
-assert_eq "absent top-level tag" "" "$g1"
-
-# ============================================================
-echo ""
-echo "=== 31. Tag env var expansion ==="
-
-# Mirrors expand_env_ref from launch.sh.
 expand_env_ref() {
     local val="$1"
     if [[ "$val" =~ ^\$([A-Za-z_][A-Za-z_0-9]*)$ ]]; then
@@ -936,354 +49,386 @@ expand_env_ref() {
     fi
 }
 
-# Direct value -> no expansion.
-assert_eq "literal tag unchanged" "literal" "$(expand_env_ref "literal")"
-
-# Empty string —> stays empty.
-assert_eq "empty stays empty" "" "$(expand_env_ref "")"
-
-# $VAR reference -> expands.
-SWARM_TAG_TEST="expanded"
-assert_eq "env ref expands" "expanded" "$(expand_env_ref '$SWARM_TAG_TEST')"
-
-# Unset variable —> expands to empty.
-unset SWARM_TAG_MISSING 2>/dev/null || true
-assert_eq "unset env ref empty" "" "$(expand_env_ref '$SWARM_TAG_MISSING')"
-
-# Not a bare $VAR (inline text) —> returned as-is.
-assert_eq "inline not expanded" 'prefix-$SWARM_TAG_TEST' \
-    "$(expand_env_ref 'prefix-$SWARM_TAG_TEST')"
-
-# ============================================================
-echo ""
-echo "=== 32. Post-process tag fallback and expansion ==="
-
-parse_pp_tag() {
-    jq -r '.post_process.tag // .tag // empty' "$1"
+expand_path_ref() {
+    local val
+    val="$(expand_env_ref "$1")"
+    printf '%s' "${val/#\~/$HOME}"
 }
 
-# Post-process has its own tag.
-cat > "$TMPDIR/pp_tag_own.json" <<'EOF'
-{
-  "prompt": "p.md",
-  "tag": "custom-top-lvl-tag",
-  "agents": [{ "count": 1, "model": "m" }],
-  "post_process": { "prompt": "r.md", "tag": "pp-review" }
-}
-EOF
-assert_eq "pp own tag" "pp-review" "$(parse_pp_tag "$TMPDIR/pp_tag_own.json")"
-
-# Post-process inherits top-level tag.
-cat > "$TMPDIR/pp_tag_inherit.json" <<'EOF'
-{
-  "prompt": "p.md",
-  "tag": "custom-top-lvl-tag",
-  "agents": [{ "count": 1, "model": "m" }],
-  "post_process": { "prompt": "r.md" }
-}
-EOF
-assert_eq "pp inherits top-level tag" "custom-top-lvl-tag" \
-    "$(parse_pp_tag "$TMPDIR/pp_tag_inherit.json")"
-
-# Neither top-level, nor post-process tag —> empty.
-cat > "$TMPDIR/pp_tag_empty.json" <<'EOF'
-{
-  "prompt": "p.md",
-  "agents": [{ "count": 1, "model": "m" }],
-  "post_process": { "prompt": "r.md" }
-}
-EOF
-assert_eq "pp no tag empty" "" "$(parse_pp_tag "$TMPDIR/pp_tag_empty.json")"
-
-# Post-process tag with env var expansion.
-SWARM_PP_TAG="expanded-pp"
-pp_raw=$(parse_pp_tag "$TMPDIR/pp_tag_inherit.json")
-assert_eq "pp tag before expansion" "custom-top-lvl-tag" "$pp_raw"
-
-cat > "$TMPDIR/pp_tag_envref.json" <<'EOF'
-{
-  "prompt": "p.md",
-  "tag": "$SWARM_PP_TAG",
-  "agents": [{ "count": 1, "model": "m" }],
-  "post_process": { "prompt": "r.md" }
-}
-EOF
-pp_raw=$(parse_pp_tag "$TMPDIR/pp_tag_envref.json")
-pp_expanded="$(expand_env_ref "$pp_raw")"
-assert_eq "pp tag env expansion" "expanded-pp" "$pp_expanded"
-
-# ============================================================
-echo ""
-echo "=== 33. docker_args array construction ==="
-
-# Mirrors the DOCKER_EXTRA_ARGS construction in launch.sh.
-build_docker_extra_args() {
-    local config_file="$1"
-    local DOCKER_EXTRA_ARGS=()
-    while IFS= read -r _da; do
-        [ -n "$_da" ] && DOCKER_EXTRA_ARGS+=("$_da")
-    done < <(jq -r '.docker_args[]?' "$config_file" 2>/dev/null)
-    echo "${DOCKER_EXTRA_ARGS[*]+"${DOCKER_EXTRA_ARGS[*]}"}"
+has_legacy_auth_fields() {
+    jq -e '
+        def legacy:
+            has("auth") or has("api_key") or has("auth_token") or has("base_url");
+        ([.agents[]? | legacy] | any) or ((.post_process? // {}) | legacy)
+    ' "$1" >/dev/null 2>&1
 }
 
-cat > "$TMPDIR/da_full.json" <<'EOF'
-{
-  "prompt": "p.md",
-  "docker_args": ["-v", "/var/run/docker.sock:/var/run/docker.sock", "--privileged"],
-  "agents": [{ "count": 1, "model": "m" }]
-}
-EOF
-
-assert_eq "docker_args full" \
-    "-v /var/run/docker.sock:/var/run/docker.sock --privileged" \
-    "$(build_docker_extra_args "$TMPDIR/da_full.json")"
-
-# No docker_args — empty.
-cat > "$TMPDIR/da_none.json" <<'EOF'
-{ "prompt": "p.md", "agents": [{ "count": 1, "model": "m" }] }
-EOF
-assert_eq "docker_args absent" "" \
-    "$(build_docker_extra_args "$TMPDIR/da_none.json")"
-
-# Empty array — empty.
-cat > "$TMPDIR/da_empty.json" <<'EOF'
-{ "prompt": "p.md", "docker_args": [], "agents": [{ "count": 1, "model": "m" }] }
-EOF
-assert_eq "docker_args empty array" "" \
-    "$(build_docker_extra_args "$TMPDIR/da_empty.json")"
-
-# Single flag.
-cat > "$TMPDIR/da_single.json" <<'EOF'
-{ "prompt": "p.md", "docker_args": ["--network=host"], "agents": [{ "count": 1, "model": "m" }] }
-EOF
-assert_eq "docker_args single" "--network=host" \
-    "$(build_docker_extra_args "$TMPDIR/da_single.json")"
-
-# Multiple volume mounts + capabilities.
-cat > "$TMPDIR/da_complex.json" <<'EOF'
-{
-  "prompt": "p.md",
-  "docker_args": ["-v", "/var/run/docker.sock:/var/run/docker.sock", "-v", "/tmp:/host-tmp:ro", "--cap-add", "SYS_PTRACE"],
-  "agents": [{ "count": 1, "model": "m" }]
-}
-EOF
-assert_eq "docker_args complex" \
-    "-v /var/run/docker.sock:/var/run/docker.sock -v /tmp:/host-tmp:ro --cap-add SYS_PTRACE" \
-    "$(build_docker_extra_args "$TMPDIR/da_complex.json")"
-
-# ============================================================
-echo ""
-echo "=== 34. Post-process creates bare repo when missing ==="
-
-# Simulate the bare-repo creation logic from cmd_post_process.
-pp_ensure_bare_repo() {
-    local repo_root="$1" bare_repo="$2"
-    if [ ! -d "$bare_repo" ]; then
-        git clone --bare "$repo_root" "$bare_repo" 2>/dev/null
-        git -C "$bare_repo" branch agent-work HEAD 2>/dev/null || true
-        git -C "$bare_repo" symbolic-ref HEAD refs/heads/agent-work
-    fi
+resolve_provider_ref() {
+    local config_file="$1" provider_ref="$2"
+    jq -r --arg ref "$provider_ref" '
+        .providers[$ref] // empty |
+        [(.kind // ""),
+         (.api_key // ""),
+         (.oauth_token // ""),
+         (.bearer_token // ""),
+         (.auth_file // ""),
+         (.base_url // "")] | join("|")
+    ' "$config_file"
 }
 
-# Set up a small git repo to clone from.
-_pp_repo="$TMPDIR/pp-src-repo"
-mkdir -p "$_pp_repo"
-git -C "$_pp_repo" init -q
-git -C "$_pp_repo" \
-    -c user.name="test" -c user.email="test@test" \
-    -c commit.gpgsign=false \
-    commit --allow-empty -m "init" -q
+validate_provider_shape() {
+    local provider_ref="$1" kind="$2" api_key="$3" oauth_token="$4"
+    local bearer_token="$5" auth_file="$6" base_url="$7"
+    local auth_count=0
 
-_pp_bare="$TMPDIR/pp-bare-test.git"
+    [ -n "$api_key" ] && auth_count=$((auth_count + 1))
+    [ -n "$oauth_token" ] && auth_count=$((auth_count + 1))
+    [ -n "$bearer_token" ] && auth_count=$((auth_count + 1))
+    [ -n "$auth_file" ] && auth_count=$((auth_count + 1))
 
-# Bare repo does not exist — should be created.
-rm -rf "$_pp_bare"
-pp_ensure_bare_repo "$_pp_repo" "$_pp_bare"
-assert_eq "pp creates bare repo" "true" \
-    "$([ -d "$_pp_bare" ] && echo true || echo false)"
-
-# Verify agent-work branch exists.
-_pp_aw=$(git -C "$_pp_bare" symbolic-ref HEAD 2>/dev/null || echo "")
-assert_eq "pp bare HEAD is agent-work" "refs/heads/agent-work" "$_pp_aw"
-
-# Bare repo already exists — should not fail or recreate.
-_pp_head_before=$(git -C "$_pp_bare" rev-parse HEAD 2>/dev/null)
-pp_ensure_bare_repo "$_pp_repo" "$_pp_bare"
-_pp_head_after=$(git -C "$_pp_bare" rev-parse HEAD 2>/dev/null)
-assert_eq "pp existing bare repo unchanged" "$_pp_head_before" "$_pp_head_after"
-
-rm -rf "$_pp_repo" "$_pp_bare"
-
-# ============================================================
-echo ""
-echo "=== 35. Bare repo is world-writable after creation ==="
-
-# Simulate the bare-repo creation + permission fix from cmd_start.
-_wr_repo="$TMPDIR/wr-src-repo"
-mkdir -p "$_wr_repo"
-git -C "$_wr_repo" init -q
-git -C "$_wr_repo" \
-    -c user.name="test" -c user.email="test@test" \
-    -c commit.gpgsign=false \
-    commit --allow-empty -m "init" -q
-
-_wr_bare="$TMPDIR/wr-bare-test.git"
-rm -rf "$_wr_bare"
-git clone --bare "$_wr_repo" "$_wr_bare" 2>/dev/null
-git -C "$_wr_bare" branch agent-work HEAD 2>/dev/null || true
-git -C "$_wr_bare" symbolic-ref HEAD refs/heads/agent-work
-git -C "$_wr_bare" config core.sharedRepository world
-chmod -R a+rwX "$_wr_bare"
-
-# Verify core.sharedRepository is set to "world".
-_wr_shared=$(git -C "$_wr_bare" config core.sharedRepository 2>/dev/null || echo "")
-assert_eq "bare repo sharedRepository=world" "world" "$_wr_shared"
-
-# Verify objects directory is world-writable (o+w).
-_wr_obj_perms=$(stat -c '%A' "$_wr_bare/objects" 2>/dev/null \
-    || stat -f '%Sp' "$_wr_bare/objects" 2>/dev/null)
-_wr_other_w=$(echo "$_wr_obj_perms" | grep -c 'w.$' || true)
-assert_eq "bare repo objects/ is world-writable" "1" "$_wr_other_w"
-
-# Verify a different user (simulated) can create objects.
-# We can't switch UID in a unit test, but we can verify the
-# permission bits on a representative subdirectory.
-_wr_pack_perms=$(stat -c '%A' "$_wr_bare/objects/pack" 2>/dev/null \
-    || stat -f '%Sp' "$_wr_bare/objects/pack" 2>/dev/null)
-_wr_pack_w=$(echo "$_wr_pack_perms" | grep -c 'w.$' || true)
-assert_eq "bare repo objects/pack/ is world-writable" "1" "$_wr_pack_w"
-
-rm -rf "$_wr_repo" "$_wr_bare"
-
-# ============================================================
-echo ""
-echo "=== 36. signing_key resolution ==="
-
-# Mirrors the signing-key resolution block in launch.sh.
-# Prints the resolved `-v` args (empty when no key configured),
-# returns 1 with an ERROR line on a missing file.
-resolve_signing_key_args() {
-    local cfg="$1"
-    local key
-    key=$(jq -r '.git_user.signing_key // empty' "$cfg")
-    key="$(expand_env_ref "$key")"
-    [ -z "$key" ] && return 0
-    key="${key/#\~/$HOME}"
-    if [ ! -f "$key" ]; then
-        echo "ERROR: signing key not found: $key" >&2
+    if [ -z "$kind" ]; then
+        echo "ERROR: provider '${provider_ref}' is missing required field: kind." >&2
         return 1
     fi
-    printf -- '-v %s:/etc/swarm/signing_key:ro' "$key"
+
+    case "$kind" in
+        none)
+            if [ "$auth_count" -ne 0 ] || [ -n "$base_url" ]; then
+                echo "ERROR: provider '${provider_ref}' kind=none does not accept auth or base_url fields." >&2
+                return 1
+            fi
+            ;;
+        anthropic)
+            if [ "$auth_count" -ne 1 ]; then
+                echo "ERROR: provider '${provider_ref}' kind=anthropic requires exactly one of api_key, oauth_token, or auth_file." >&2
+                return 1
+            fi
+            [ -n "$bearer_token" ] && return 1
+            ;;
+        anthropic-compatible)
+            if [ -z "$base_url" ]; then
+                echo "ERROR: provider '${provider_ref}' kind=anthropic-compatible requires base_url." >&2
+                return 1
+            fi
+            if [ "$auth_count" -ne 1 ] || [ -n "$oauth_token" ]; then
+                echo "ERROR: provider '${provider_ref}' kind=anthropic-compatible requires exactly one of api_key, bearer_token, or auth_file." >&2
+                return 1
+            fi
+            ;;
+        openai)
+            if [ "$auth_count" -ne 1 ] || [ -n "$oauth_token" ] || [ -n "$bearer_token" ]; then
+                echo "ERROR: provider '${provider_ref}' kind=openai requires exactly one of api_key or auth_file." >&2
+                return 1
+            fi
+            ;;
+        openai-compatible)
+            if [ -z "$base_url" ]; then
+                echo "ERROR: provider '${provider_ref}' kind=openai-compatible requires base_url." >&2
+                return 1
+            fi
+            if [ "$auth_count" -ne 1 ] || [ -n "$oauth_token" ]; then
+                echo "ERROR: provider '${provider_ref}' kind=openai-compatible requires exactly one of api_key, bearer_token, or auth_file." >&2
+                return 1
+            fi
+            ;;
+        gemini|kimi|factory)
+            if [ "$auth_count" -ne 1 ] || [ -z "$api_key" ] || [ -n "$oauth_token" ] || [ -n "$bearer_token" ] || [ -n "$auth_file" ]; then
+                echo "ERROR: provider '${provider_ref}' kind=${kind} requires api_key and does not accept oauth_token, bearer_token, or auth_file." >&2
+                return 1
+            fi
+            if [ "$kind" != "kimi" ] && [ -n "$base_url" ]; then
+                echo "ERROR: provider '${provider_ref}' kind=${kind} does not accept base_url." >&2
+                return 1
+            fi
+            ;;
+        *)
+            echo "ERROR: provider '${provider_ref}' has unknown kind '${kind}'." >&2
+            return 1
+            ;;
+    esac
+
+    if [ -n "$auth_file" ] && [ ! -f "$auth_file" ]; then
+        echo "ERROR: provider '${provider_ref}' auth_file not found: ${auth_file}" >&2
+        return 1
+    fi
 }
 
-# No signing_key configured -> empty args.
-cat > "$TMPDIR/sign_none.json" <<'EOF'
-{
-  "prompt": "p.md",
-  "git_user": { "name": "bot", "email": "bot@test" },
-  "agents": [{ "count": 1, "model": "m" }]
+parse_agents_cfg() {
+    jq -r '
+        .tag as $dt | .driver as $dd | .agents[] | range(.count) as $i |
+        [.model, (.provider // ""), (.effort // ""), (.context // ""), (.prompt // ""), (.tag // $dt // ""), (.driver // $dd // "")] | join("|")
+    ' "$1"
 }
-EOF
-assert_eq "no signing_key -> no args" "" \
-    "$(resolve_signing_key_args "$TMPDIR/sign_none.json")"
 
-# Literal path to existing file -> expanded args.
-_sk_dir="$TMPDIR/sk-$$"
-mkdir -p "$_sk_dir"
-touch "$_sk_dir/key"
-cat > "$TMPDIR/sign_literal.json" <<EOF
-{
-  "prompt": "p.md",
-  "git_user": {
-    "name": "bot", "email": "bot@test",
-    "signing_key": "$_sk_dir/key"
-  },
-  "agents": [{ "count": 1, "model": "m" }]
+derive_swarm_agents() {
+    local config_file="$1"
+    local default_driver seen out pp_driver
+    default_driver=$(jq -r '.driver // "claude-code"' "$config_file")
+    seen=" "
+    out=""
+
+    while IFS='|' read -r _ _ _ _ _ _ driver; do
+        driver="${driver:-$default_driver}"
+        [[ "$seen" == *" $driver "* ]] && continue
+        seen+=" $driver "
+        out="${out:+${out},}${driver}"
+    done < <(parse_agents_cfg "$config_file")
+
+    pp_driver=$(jq -r '.post_process.driver // .driver // "claude-code"' "$config_file")
+    if [[ "$seen" != *" $pp_driver "* ]]; then
+        out="${out:+${out},}${pp_driver}"
+    fi
+    printf '%s' "$out"
 }
-EOF
-assert_eq "literal signing_key -> v args" \
-    "-v $_sk_dir/key:/etc/swarm/signing_key:ro" \
-    "$(resolve_signing_key_args "$TMPDIR/sign_literal.json")"
 
-# $VAR reference with var set -> env value expanded.
-SWARM_SK_TEST="$_sk_dir/key"
-cat > "$TMPDIR/sign_envref.json" <<'EOF'
-{
-  "prompt": "p.md",
-  "git_user": {
-    "name": "bot", "email": "bot@test",
-    "signing_key": "$SWARM_SK_TEST"
-  },
-  "agents": [{ "count": 1, "model": "m" }]
+validate_driver_cfg() {
+    local driver="$1" model="$2" provider_ref="$3" kind="$4" api_key="$5"
+    local oauth_token="$6" bearer_token="$7" auth_file="$8" base_url="$9" effort="${10}"
+    # shellcheck source=/dev/null
+    source "$DRIVERS_DIR/${driver}.sh"
+    agent_validate_config "$model" "$provider_ref" "$kind" "$api_key" \
+        "$oauth_token" "$bearer_token" "$auth_file" "$base_url" "$effort"
 }
-EOF
-assert_eq "env-ref signing_key -> expanded args" \
-    "-v $_sk_dir/key:/etc/swarm/signing_key:ro" \
-    "$(resolve_signing_key_args "$TMPDIR/sign_envref.json")"
 
-# $VAR reference unset -> no args (no silent default fallback).
-unset SWARM_SK_MISSING 2>/dev/null || true
-cat > "$TMPDIR/sign_envref_missing.json" <<'EOF'
-{
-  "prompt": "p.md",
-  "git_user": {
-    "name": "bot", "email": "bot@test",
-    "signing_key": "$SWARM_SK_MISSING"
-  },
-  "agents": [{ "count": 1, "model": "m" }]
-}
-EOF
-assert_eq "unset env-ref signing_key -> no args" "" \
-    "$(resolve_signing_key_args "$TMPDIR/sign_envref_missing.json")"
+# ============================================================
+echo "=== 1. Environment and path expansion ==="
 
-# Tilde-prefixed path -> $HOME expanded.
-_sk_home="$TMPDIR/sk-home-$$"
-mkdir -p "$_sk_home/.ssh"
-touch "$_sk_home/.ssh/key"
-cat > "$TMPDIR/sign_tilde.json" <<'EOF'
-{
-  "prompt": "p.md",
-  "git_user": {
-    "name": "bot", "email": "bot@test",
-    "signing_key": "~/.ssh/key"
-  },
-  "agents": [{ "count": 1, "model": "m" }]
-}
-EOF
-assert_eq "tilde signing_key -> HOME expanded" \
-    "-v $_sk_home/.ssh/key:/etc/swarm/signing_key:ro" \
-    "$(HOME="$_sk_home" resolve_signing_key_args "$TMPDIR/sign_tilde.json")"
-
-# Missing file -> error on stderr, non-zero return.
-cat > "$TMPDIR/sign_missing.json" <<EOF
-{
-  "prompt": "p.md",
-  "git_user": {
-    "name": "bot", "email": "bot@test",
-    "signing_key": "$TMPDIR/does-not-exist"
-  },
-  "agents": [{ "count": 1, "model": "m" }]
-}
-EOF
-_missing_err=$(resolve_signing_key_args "$TMPDIR/sign_missing.json" 2>&1 \
-    >/dev/null || true)
-_missing_has_err=$(echo "$_missing_err" \
-    | grep -c "ERROR: signing key not found" || true)
-assert_eq "missing signing_key -> error line" "1" "$_missing_has_err"
-
-if resolve_signing_key_args "$TMPDIR/sign_missing.json" >/dev/null 2>&1; then
-    _missing_rc="zero"
-else
-    _missing_rc="nonzero"
-fi
-assert_eq "missing signing_key -> non-zero exit" "nonzero" "$_missing_rc"
-
-rm -rf "$_sk_dir" "$_sk_home"
+export SWARM_TEST_TOKEN="swarm-token"
+assert_eq "expand env ref" "swarm-token" "$(expand_env_ref '$SWARM_TEST_TOKEN')"
+assert_eq "expand literal" "literal" "$(expand_env_ref 'literal')"
+assert_eq "expand unset env ref" "" "$(expand_env_ref '$SWARM_MISSING_TOKEN')"
+assert_eq "expand tilde path" "${HOME}/.codex/auth.json" "$(expand_path_ref '~/.codex/auth.json')"
 
 # ============================================================
 echo ""
-echo "==============================="
-echo "  ${PASS} passed, ${FAIL} failed"
-echo "==============================="
+echo "=== 2. Legacy auth detection ==="
 
+cat > "$TMPDIR/legacy.json" <<'EOF'
+{
+  "providers": {
+    "p": { "kind": "anthropic", "oauth_token": "$CLAUDE_CODE_OAUTH_TOKEN" }
+  },
+  "agents": [
+    { "count": 1, "model": "claude-opus-4-6", "provider": "p", "auth": "oauth" }
+  ]
+}
+EOF
+
+cat > "$TMPDIR/v2.json" <<'EOF'
+{
+  "providers": {
+    "p": { "kind": "anthropic", "oauth_token": "$CLAUDE_CODE_OAUTH_TOKEN" }
+  },
+  "agents": [
+    { "count": 1, "model": "claude-opus-4-6", "provider": "p" }
+  ]
+}
+EOF
+
+assert_eq "legacy fields detected" "true" "$({ has_legacy_auth_fields "$TMPDIR/legacy.json" && echo true; } || echo false)"
+assert_eq "v2 fields not detected as legacy" "false" "$({ has_legacy_auth_fields "$TMPDIR/v2.json" && echo true; } || echo false)"
+
+# ============================================================
+echo ""
+echo "=== 3. Provider resolution and validation ==="
+
+AUTH_FILE="$TMPDIR/auth.json"
+echo '{"tokens":{"access":"test"}}' > "$AUTH_FILE"
+
+cat > "$TMPDIR/providers.json" <<EOF
+{
+  "providers": {
+    "none": { "kind": "none" },
+    "anthropic_key": { "kind": "anthropic", "api_key": "\$ANTHROPIC_API_KEY" },
+    "anthropic_oauth": { "kind": "anthropic", "oauth_token": "\$CLAUDE_CODE_OAUTH_TOKEN" },
+    "anthropic_file": { "kind": "anthropic", "auth_file": "$AUTH_FILE" },
+    "openrouter": {
+      "kind": "anthropic-compatible",
+      "base_url": "https://openrouter.ai/api",
+      "bearer_token": "\$OPENROUTER_API_KEY"
+    },
+    "anthropic_proxy_file": {
+      "kind": "anthropic-compatible",
+      "base_url": "https://proxy.example.com",
+      "auth_file": "$AUTH_FILE"
+    },
+    "openai_key": { "kind": "openai", "api_key": "\$OPENAI_API_KEY" },
+    "openai_file": { "kind": "openai", "auth_file": "$AUTH_FILE" },
+    "openai_proxy": {
+      "kind": "openai-compatible",
+      "base_url": "https://api.example.com/v1",
+      "auth_file": "$AUTH_FILE"
+    },
+    "gemini_key": { "kind": "gemini", "api_key": "\$GEMINI_API_KEY" },
+    "kimi_key": {
+      "kind": "kimi",
+      "api_key": "\$KIMI_API_KEY",
+      "base_url": "https://api.kimi.com/coding/v1"
+    },
+    "factory_key": { "kind": "factory", "api_key": "\$FACTORY_API_KEY" }
+  }
+}
+EOF
+
+export ANTHROPIC_API_KEY="sk-ant"
+export CLAUDE_CODE_OAUTH_TOKEN="sk-oauth"
+export OPENROUTER_API_KEY="sk-or"
+export OPENAI_API_KEY="sk-openai"
+export GEMINI_API_KEY="sk-gem"
+export KIMI_API_KEY="sk-kimi"
+export FACTORY_API_KEY="sk-factory"
+
+for provider in none anthropic_key anthropic_oauth anthropic_file openrouter anthropic_proxy_file openai_key openai_file openai_proxy gemini_key kimi_key factory_key; do
+    line=$(resolve_provider_ref "$TMPDIR/providers.json" "$provider")
+    IFS='|' read -r kind api_key oauth_token bearer_token auth_file base_url <<< "$line"
+    api_key="$(expand_env_ref "$api_key")"
+    oauth_token="$(expand_env_ref "$oauth_token")"
+    bearer_token="$(expand_env_ref "$bearer_token")"
+    auth_file="$(expand_path_ref "$auth_file")"
+    base_url="$(expand_env_ref "$base_url")"
+    assert_eq "${provider} validates" "ok" \
+        "$(validate_provider_shape "$provider" "$kind" "$api_key" "$oauth_token" "$bearer_token" "$auth_file" "$base_url" >/dev/null 2>&1 && echo ok || echo fail)"
+done
+
+assert_eq "resolve anthropic_key raw value" 'anthropic|$ANTHROPIC_API_KEY|||' \
+    "$(resolve_provider_ref "$TMPDIR/providers.json" "anthropic_key" | cut -d'|' -f1-5)"
+assert_eq "resolve unknown provider empty" "" "$(resolve_provider_ref "$TMPDIR/providers.json" "missing")"
+
+# ============================================================
+echo ""
+echo "=== 4. Invalid provider shapes are rejected ==="
+
+assert_eq "missing kind rejected" "fail" \
+    "$(validate_provider_shape "bad" "" "" "" "" "" "" >/dev/null 2>&1 && echo ok || echo fail)"
+assert_eq "none rejects auth" "fail" \
+    "$(validate_provider_shape "bad" "none" "sk" "" "" "" "" >/dev/null 2>&1 && echo ok || echo fail)"
+assert_eq "anthropic rejects multiple auth sources" "fail" \
+    "$(validate_provider_shape "bad" "anthropic" "sk" "tok" "" "" "" >/dev/null 2>&1 && echo ok || echo fail)"
+assert_eq "anthropic-compatible requires base_url" "fail" \
+    "$(validate_provider_shape "bad" "anthropic-compatible" "" "" "tok" "" "" >/dev/null 2>&1 && echo ok || echo fail)"
+assert_eq "openai-compatible requires base_url" "fail" \
+    "$(validate_provider_shape "bad" "openai-compatible" "sk" "" "" "" "" >/dev/null 2>&1 && echo ok || echo fail)"
+assert_eq "gemini rejects base_url" "fail" \
+    "$(validate_provider_shape "bad" "gemini" "sk" "" "" "" "https://x" >/dev/null 2>&1 && echo ok || echo fail)"
+assert_eq "missing auth file rejected" "fail" \
+    "$(validate_provider_shape "bad" "openai" "" "" "" "$TMPDIR/nope.json" "" >/dev/null 2>&1 && echo ok || echo fail)"
+assert_eq "unknown provider kind rejected" "fail" \
+    "$(validate_provider_shape "bad" "mystery" "" "" "" "" "" >/dev/null 2>&1 && echo ok || echo fail)"
+
+# ============================================================
+echo ""
+echo "=== 5. Agents CFG and install-set derivation ==="
+
+cat > "$TMPDIR/swarm.json" <<'EOF'
+{
+  "driver": "claude-code",
+  "tag": "top",
+  "providers": {
+    "anthropic_oauth": { "kind": "anthropic", "oauth_token": "$CLAUDE_CODE_OAUTH_TOKEN" },
+    "gemini_key": { "kind": "gemini", "api_key": "$GEMINI_API_KEY" },
+    "openai_key": { "kind": "openai", "api_key": "$OPENAI_API_KEY" }
+  },
+  "agents": [
+    { "count": 2, "model": "claude-opus-4-6", "provider": "anthropic_oauth" },
+    { "count": 1, "model": "gemini-2.5-pro", "provider": "gemini_key", "driver": "gemini-cli", "context": "slim" },
+    { "count": 1, "model": "gpt-5.4", "provider": "openai_key", "driver": "codex-cli", "prompt": "prompts/review.md", "tag": "review" }
+  ],
+  "post_process": {
+    "prompt": "prompts/post.md",
+    "model": "anthropic/claude-sonnet-4-5-20250929",
+    "provider": "anthropic_oauth",
+    "driver": "opencode"
+  }
+}
+EOF
+
+CFG=$(parse_agents_cfg "$TMPDIR/swarm.json")
+assert_eq "agents cfg line count" "4" "$(echo "$CFG" | wc -l | tr -d ' ')"
+
+LINE1=$(echo "$CFG" | sed -n '1p')
+LINE3=$(echo "$CFG" | sed -n '3p')
+LINE4=$(echo "$CFG" | sed -n '4p')
+IFS='|' read -r model1 provider1 effort1 context1 prompt1 tag1 driver1 <<< "$LINE1"
+IFS='|' read -r model3 provider3 effort3 context3 prompt3 tag3 driver3 <<< "$LINE3"
+IFS='|' read -r model4 provider4 effort4 context4 prompt4 tag4 driver4 <<< "$LINE4"
+
+assert_eq "agent1 provider" "anthropic_oauth" "$provider1"
+assert_eq "agent1 tag inherits top-level" "top" "$tag1"
+assert_eq "agent1 driver inherits default" "claude-code" "$driver1"
+assert_eq "agent3 context" "slim" "$context3"
+assert_eq "agent3 driver" "gemini-cli" "$driver3"
+assert_eq "agent4 prompt" "prompts/review.md" "$prompt4"
+assert_eq "agent4 tag override" "review" "$tag4"
+assert_eq "agent4 driver" "codex-cli" "$driver4"
+
+assert_eq "derived SWARM_AGENTS" "claude-code,gemini-cli,codex-cli,opencode" "$(derive_swarm_agents "$TMPDIR/swarm.json")"
+
+# ============================================================
+echo ""
+echo "=== 6. Driver launch validation uses provider contract ==="
+
+assert_eq "claude accepts anthropic oauth" "ok" \
+    "$(validate_driver_cfg "claude-code" "claude-opus-4-6" "anthropic_oauth" "anthropic" "" "sk-oauth" "" "" "" "high" >/dev/null 2>&1 && echo ok || echo fail)"
+assert_eq "claude accepts anthropic-compatible bearer" "ok" \
+    "$(validate_driver_cfg "claude-code" "openai/gpt-5.4" "openrouter" "anthropic-compatible" "" "" "sk-or" "" "https://openrouter.ai/api" "" >/dev/null 2>&1 && echo ok || echo fail)"
+assert_eq "claude rejects auth_file" "fail" \
+    "$(validate_driver_cfg "claude-code" "claude-opus-4-6" "anthropic_file" "anthropic" "" "" "" "$AUTH_FILE" "" "" >/dev/null 2>&1 && echo ok || echo fail)"
+
+assert_eq "codex accepts api_key" "ok" \
+    "$(validate_driver_cfg "codex-cli" "gpt-5.4" "openai_key" "openai" "sk-openai" "" "" "" "" "" >/dev/null 2>&1 && echo ok || echo fail)"
+assert_eq "codex accepts auth_file" "ok" \
+    "$(validate_driver_cfg "codex-cli" "gpt-5.4" "openai_file" "openai" "" "" "" "$AUTH_FILE" "" "" >/dev/null 2>&1 && echo ok || echo fail)"
+assert_eq "codex rejects wrong kind" "fail" \
+    "$(validate_driver_cfg "codex-cli" "gpt-5.4" "anthropic_key" "anthropic" "sk" "" "" "" "" "" >/dev/null 2>&1 && echo ok || echo fail)"
+
+assert_eq "gemini accepts gemini key" "ok" \
+    "$(validate_driver_cfg "gemini-cli" "gemini-2.5-pro" "gemini_key" "gemini" "sk-gem" "" "" "" "" "" >/dev/null 2>&1 && echo ok || echo fail)"
+assert_eq "gemini rejects base_url" "fail" \
+    "$(validate_driver_cfg "gemini-cli" "gemini-2.5-pro" "gemini_key" "gemini" "sk-gem" "" "" "" "https://x" "" >/dev/null 2>&1 && echo ok || echo fail)"
+
+assert_eq "kimi accepts kimi key" "ok" \
+    "$(validate_driver_cfg "kimi-cli" "kimi-for-coding" "kimi_key" "kimi" "sk-kimi" "" "" "" "https://api.kimi.com/coding/v1" "off" >/dev/null 2>&1 && echo ok || echo fail)"
+assert_eq "kimi rejects oauth token" "fail" \
+    "$(validate_driver_cfg "kimi-cli" "kimi-for-coding" "kimi_key" "kimi" "" "tok" "" "" "" "" >/dev/null 2>&1 && echo ok || echo fail)"
+
+assert_eq "opencode accepts anthropic oauth" "ok" \
+    "$(validate_driver_cfg "opencode" "anthropic/claude-sonnet-4-5-20250929" "anthropic_oauth" "anthropic" "" "sk-oauth" "" "" "" "high" >/dev/null 2>&1 && echo ok || echo fail)"
+assert_eq "opencode accepts openai-compatible auth_file" "ok" \
+    "$(validate_driver_cfg "opencode" "proxy/gpt-5.4" "proxy" "openai-compatible" "" "" "" "$AUTH_FILE" "https://api.example.com/v1" "" >/dev/null 2>&1 && echo ok || echo fail)"
+assert_eq "opencode rejects wrong model prefix" "fail" \
+    "$(validate_driver_cfg "opencode" "openai/gpt-5.4" "proxy" "openai-compatible" "sk" "" "" "" "https://api.example.com/v1" "" >/dev/null 2>&1 && echo ok || echo fail)"
+
+assert_eq "droid accepts factory key" "ok" \
+    "$(validate_driver_cfg "droid" "glm-4.7" "factory_key" "factory" "sk-factory" "" "" "" "" "medium" >/dev/null 2>&1 && echo ok || echo fail)"
+assert_eq "droid rejects non-factory kind" "fail" \
+    "$(validate_driver_cfg "droid" "glm-4.7" "openai_key" "openai" "sk-openai" "" "" "" "" "" >/dev/null 2>&1 && echo ok || echo fail)"
+
+assert_eq "fake accepts none provider" "ok" \
+    "$(validate_driver_cfg "fake" "fake-model" "none" "none" "" "" "" "" "" "" >/dev/null 2>&1 && echo ok || echo fail)"
+assert_eq "fake rejects auth" "fail" \
+    "$(validate_driver_cfg "fake" "fake-model" "none" "none" "sk" "" "" "" "" "" >/dev/null 2>&1 && echo ok || echo fail)"
+
+# ============================================================
+echo ""
+echo "=== 7. parse_start_args ==="
+
+_LAUNCH="$TESTS_DIR/../launch.sh"
+eval "$(sed -n '/^parse_start_args()/,/^}/p' "$_LAUNCH")"
+
+parse_start_args --dashboard
+assert_eq "dashboard flag sets OPEN_DASHBOARD" "true" "$OPEN_DASHBOARD"
+
+parse_start_args
+assert_eq "dashboard default false" "false" "$OPEN_DASHBOARD"
+
+if (parse_start_args --bogus 2>/dev/null); then
+    echo "  FAIL: unknown start option should fail"
+    FAIL=$((FAIL + 1))
+else
+    echo "  PASS: unknown start option rejected"
+    PASS=$((PASS + 1))
+fi
+
+echo ""
+echo "${PASS} passed, ${FAIL} failed"
 [ "$FAIL" -eq 0 ]

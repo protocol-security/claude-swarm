@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.22.0 — 2026-04-23
+
+- **Breaking: swarm auth moved to a unified provider model.**
+  Per-agent and `post_process` fields `auth`, `api_key`,
+  `auth_token`, and `base_url` are removed. Swarmfiles must now
+  define a top-level `providers` map and reference providers with
+  `provider` from each agent group and post-processor.
+- **OpenCode and Droid are now first-class swarm drivers.**
+  `launch.sh` resolves and validates provider references before any
+  container starts, then passes a normalized provider contract into
+  each driver. `opencode` now generates native config/auth files
+  inside the container from the selected provider instead of
+  depending on host-side setup as the primary path. `droid` now
+  uses the same declarative provider flow as the other drivers.
+- **Kimi, Codex, Gemini, and Claude migrated to the same contract.**
+  Each built-in driver now validates supported provider kinds
+  explicitly and rejects incompatible auth shapes at launch time.
+  `codex-cli` uses `openai` providers with `api_key` or
+  `auth_file`, `kimi-cli` uses `kimi`, `gemini-cli` uses
+  `gemini`, and `claude-code` uses `anthropic` or
+  `anthropic-compatible`.
+- **Docs, fixtures, and tests updated for v2 swarmfiles.**
+  Example configs under `tests/configs/` are now provider-based,
+  `tests/test_config.sh`, `tests/test_launch.sh`, and
+  `tests/test_drivers.sh` were rewritten around the new schema and
+  driver contract, and the README/usage docs now document the
+  provider system and migration.
+
 ## 0.21.0 — 2026-04-23
 
 - **New built-in drivers: `kimi-cli`, `opencode`, and `droid`.**

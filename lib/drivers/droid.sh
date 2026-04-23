@@ -11,17 +11,14 @@ agent_name()    { echo "Droid"; }
 agent_cmd()     { echo "droid"; }
 
 # Validate launch-time config for the Droid driver.
-# Args: <model> <base_url> <api_key> <effort> <auth_mode> <auth_token>
+# Args: <model> <provider_ref> <kind> <api_key> <oauth_token> <bearer_token> <auth_file> <base_url> <effort>
 agent_validate_config() {
-    local _model="$1" base_url="$2" api_key="$3" _effort="$4"
-    local auth_mode="$5" auth_token="$6"
+    local _model="$1" provider_ref="$2" kind="$3" api_key="$4"
+    local oauth_token="$5" bearer_token="$6" auth_file="$7" base_url="$8" _effort="$9"
 
-    if [ -n "$base_url" ] || [ -n "$api_key" ] || [ -n "$auth_mode" ] || [ -n "$auth_token" ]; then
-        echo "ERROR: driver droid does not use swarm auth/base_url fields; configure FACTORY_API_KEY in the environment." >&2
-        return 1
-    fi
-    if [ -z "${FACTORY_API_KEY:-}" ]; then
-        echo "ERROR: driver droid requires FACTORY_API_KEY in the environment." >&2
+    if [ "$kind" != "factory" ] || [ -z "$api_key" ] || [ -n "$oauth_token" ] \
+        || [ -n "$bearer_token" ] || [ -n "$auth_file" ] || [ -n "$base_url" ]; then
+        echo "ERROR: driver droid requires provider '${provider_ref}' kind=factory with api_key only." >&2
         return 1
     fi
 }
@@ -158,11 +155,12 @@ agent_is_retriable() {
 agent_docker_env() { :; }
 
 agent_docker_auth() {
-    local _api_key="$1" _auth_token="$2" _auth_mode="$3" _base_url="$4"
+    local _provider_ref="$1" _kind="$2" api_key="$3"
+    # oauth_token=$4 bearer_token=$5 auth_file=$6 base_url=$7 — unused.
     local label=""
 
-    if [ -n "${FACTORY_API_KEY:-}" ]; then
-        printf -- '-e\nFACTORY_API_KEY=%s\n' "${FACTORY_API_KEY}"
+    if [ -n "$api_key" ]; then
+        printf -- '-e\nFACTORY_API_KEY=%s\n' "$api_key"
         label="key"
     fi
     printf -- '-e\nSWARM_AUTH_MODE=%s\n' "$label"

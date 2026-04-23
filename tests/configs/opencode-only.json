@@ -1,10 +1,17 @@
 {
   "prompt": "unused",
   "driver": "opencode",
+  "providers": {
+    "anthropic_oauth": {
+      "kind": "anthropic",
+      "oauth_token": "$CLAUDE_CODE_OAUTH_TOKEN"
+    }
+  },
   "agents": [
     {
       "count": 2,
       "model": "anthropic/claude-sonnet-4-5-20250929",
+      "provider": "anthropic_oauth",
       "effort": "high"
     }
   ]

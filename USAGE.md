@@ -27,14 +27,15 @@ Credentials stay as env vars (not in shell history).
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ANTHROPIC_API_KEY` | | API key (or use `CLAUDE_CODE_OAUTH_TOKEN`). |
-| `CLAUDE_CODE_OAUTH_TOKEN` | | OAuth token via `claude setup-token`. |
-| `OPENAI_API_KEY` | | OpenAI API key (for Codex CLI driver). |
-| `CODEX_AUTH_JSON` | `~/.codex/auth.json` | Path to Codex auth file (ChatGPT subscription). |
-| `GEMINI_API_KEY` | | Google API key (for Gemini CLI driver). |
-| `KIMI_API_KEY` | | Kimi API key. Usually referenced from swarm config via `"api_key": "$KIMI_API_KEY"`. |
-| `OPENCODE_AUTH_JSON` | `~/.local/share/opencode/auth.json` | Path to OpenCode's native auth file. |
-| `FACTORY_API_KEY` | | Factory API key (for Droid). |
+| `ANTHROPIC_API_KEY` | | Anthropic API key. Commonly referenced from a provider as `"api_key": "$ANTHROPIC_API_KEY"`. |
+| `CLAUDE_CODE_OAUTH_TOKEN` | | Anthropic OAuth token via `claude setup-token`. Commonly referenced as `"oauth_token": "$CLAUDE_CODE_OAUTH_TOKEN"`. |
+| `OPENROUTER_API_KEY` | | Bearer token for Anthropic-compatible OpenRouter providers. |
+| `MINIMAX_API_KEY` | | API key for Anthropic-compatible MiniMax providers. |
+| `OPENAI_API_KEY` | | OpenAI API key. Commonly referenced from `openai` providers. |
+| `CODEX_AUTH_JSON` | `~/.codex/auth.json` | Optional path for a Codex/OpenAI auth file used via provider `"auth_file"`. |
+| `GEMINI_API_KEY` | | Google API key for `gemini` providers. |
+| `KIMI_API_KEY` | | Kimi API key for `kimi` providers. |
+| `FACTORY_API_KEY` | | Factory API key for `factory` providers. |
 | `SWARM_CONFIG` | | Path to swarmfile (or place `swarm.json` in repo root). |
 | `SWARM_TITLE` | | Dashboard title override. |
 | `SWARM_SKIP_DEP_CHECK` | | Set to `1` to silence dependency version warnings. |
@@ -42,25 +43,33 @@ Credentials stay as env vars (not in shell history).
 | `SWARM_ACTIVITY_POLL` | `10` | Watchdog mtime-poll interval, in seconds.  Rarely needs tuning. |
 | `SWARM_WATCHDOG_GRACE` | `10` | Grace window between watchdog SIGTERM and SIGKILL.  Rarely needs tuning. |
 
-Per-group credentials (`api_key`, `auth_token`, `base_url`)
-are set in the swarmfile.  Use `$VAR` references to pull
-values from the host environment without hardcoding secrets.
+Use bare `$VAR` references in the swarmfile's top-level
+`providers` map to pull secrets from the host environment
+without hardcoding them.
 
 ## Config file fields
 
-Per-group fields in `swarm.json` `agents` array:
+Top-level provider entries in `swarm.json`:
+
+| Field | Values | Notes |
+|-------|--------|-------|
+| `kind` | `none`, `anthropic`, `anthropic-compatible`, `openai`, `openai-compatible`, `gemini`, `kimi`, `factory` | Required. |
+| `api_key` | key or `$VAR` | Supported by `anthropic`, `anthropic-compatible`, `openai`, `openai-compatible`, `gemini`, `kimi`, `factory`. |
+| `oauth_token` | token or `$VAR` | Supported by `anthropic` only. |
+| `bearer_token` | token or `$VAR` | Supported by `anthropic-compatible` and `openai-compatible`. |
+| `auth_file` | path or `$VAR` | Supported by `anthropic`, `anthropic-compatible`, `openai`, and `openai-compatible`. |
+| `base_url` | URL | Supported by `anthropic-compatible`, `openai-compatible`, and optional for `kimi`. |
+
+Per-group fields in the `agents` array:
 
 | Field | Values | Notes |
 |-------|--------|-------|
 | `model` | model name | Required. |
 | `count` | integer | Number of agents in this group. |
+| `provider` | provider name | Required. Must reference a top-level provider entry. |
 | `effort` | string | Reasoning depth (see below). |
 | `context` | `full`, `slim`, `none` | How much of `.claude/` to keep (default: `full`). |
 | `prompt` | file path | Per-group prompt override (default: top-level). |
-| `auth` | `apikey`, `oauth`, `chatgpt`, omit | Which host credential to inject. Driver-dependent; see [Auth modes](#auth-modes). |
-| `api_key` | key or `$VAR` | Per-group API key. Used by Claude-compatible endpoints and `kimi-cli`. |
-| `auth_token` | key or `$VAR` | Per-group Bearer token for Claude-compatible third-party endpoints. |
-| `base_url` | URL | Per-group API endpoint. Used by Claude-compatible endpoints and optional `kimi-cli` overrides. |
 | `tag` | string or `$VAR` | Label for grouping runs (default: top-level). |
 | `driver` | driver name | Agent driver override (default: top-level or `claude-code`). |
 
@@ -74,7 +83,7 @@ Per-group fields in `swarm.json` `agents` array:
 - Gemini CLI: ignored.
 
 Top-level fields: `prompt`, `setup`, `max_idle` (default: `3`),
-`max_retry_wait`, `driver`, `inject_git_rules`,
+`max_retry_wait`, `driver`, `providers`, `inject_git_rules`,
 `git_user` (`name`, `email`, `signing_key`),
 `claude_code_version`, `title`, `tag`, `pricing`,
 `docker_args`, `post_process`.
@@ -332,6 +341,7 @@ Add to `swarm.json`:
   "post_process": {
     "prompt": "prompts/review.md",
     "model": "claude-opus-4-6",
+    "provider": "anthropic_oauth",
     "effort": "low",
     "max_idle": 2
   }
@@ -344,13 +354,12 @@ or automatically via `./launch.sh wait`.
 The post-process agent clones the same bare repo, sees all
 commits on `agent-work`, runs its prompt, and pushes.
 
-`post_process` also accepts `base_url`, `api_key`,
-`auth_token`, `auth`, `tag`, `driver`, and `max_idle` -- same
-fields as per-group agents -- to route post-processing through
-a different provider or credential. `max_idle` controls how
-many consecutive sessions with no commits before the
-post-processor exits. When omitted it inherits the top-level
-`max_idle` (default: `3`).
+`post_process` accepts the same routing fields as agent groups:
+`provider`, `effort`, `tag`, `driver`, and `max_idle`.
+`provider` is required whenever `post_process` is configured.
+`max_idle` controls how many consecutive sessions with no
+commits before the post-processor exits. When omitted it
+inherits the top-level `max_idle` (default: `3`).
 
 ## Context modes
 
@@ -372,9 +381,15 @@ Set per group in `swarm.json`:
 
 ```json
 {
+  "providers": {
+    "anthropic_oauth": {
+      "kind": "anthropic",
+      "oauth_token": "$CLAUDE_CODE_OAUTH_TOKEN"
+    }
+  },
   "agents": [
-    { "count": 2, "model": "claude-opus-4-6" },
-    { "count": 1, "model": "claude-opus-4-6", "context": "none" }
+    { "count": 2, "model": "claude-opus-4-6", "provider": "anthropic_oauth" },
+    { "count": 1, "model": "claude-opus-4-6", "provider": "anthropic_oauth", "context": "none" }
   ]
 }
 ```
@@ -391,9 +406,16 @@ Each agent group can run a different prompt file:
 ```json
 {
   "prompt": "tasks/hunt.md",
+  "providers": {
+    "anthropic_oauth": {
+      "kind": "anthropic",
+      "oauth_token": "$CLAUDE_CODE_OAUTH_TOKEN"
+    }
+  },
   "agents": [
-    { "count": 2, "model": "claude-opus-4-6" },
+    { "count": 2, "model": "claude-opus-4-6", "provider": "anthropic_oauth" },
     { "count": 1, "model": "claude-sonnet-4-6",
+      "provider": "anthropic_oauth",
       "prompt": "tasks/review.md" }
   ]
 }
@@ -405,10 +427,18 @@ omitted entirely:
 
 ```json
 {
+  "providers": {
+    "anthropic_oauth": {
+      "kind": "anthropic",
+      "oauth_token": "$CLAUDE_CODE_OAUTH_TOKEN"
+    }
+  },
   "agents": [
     { "count": 2, "model": "claude-opus-4-6",
+      "provider": "anthropic_oauth",
       "prompt": "tasks/hunt.md" },
     { "count": 1, "model": "claude-sonnet-4-6",
+      "provider": "anthropic_oauth",
       "prompt": "tasks/review.md" }
   ]
 }
@@ -418,136 +448,98 @@ Combined with context modes, this enables divergent exploration:
 hunting agents run one prompt with full skills, a reconciliation
 agent runs a different prompt to validate and normalize findings.
 
-## Auth modes
+## Providers
 
-Three credential mechanisms serve different purposes:
+Swarm v2 removed per-agent `auth`, `api_key`, `auth_token`,
+and `base_url`. All credentials now live in the top-level
+`providers` map, and each agent or post-processor selects one
+with `provider`.
 
-- **`auth`** — Controls which host credential is forwarded to
-  the container.  Values: `apikey`, `oauth`, `chatgpt`, or
-  omit (auto-detect). Driver-dependent.
-
-- **`api_key`** — Per-group API key for third-party endpoints
-  (MiniMax, etc.) or for `kimi-cli`. Supports `$VAR`
-  references to host env vars.
-
-- **`auth_token`** — Per-group Bearer token for endpoints
-  that use `ANTHROPIC_AUTH_TOKEN` (OpenRouter-style).  Clears
-  `ANTHROPIC_API_KEY` so Claude Code enters third-party mode.
-  Supports `$VAR` references.
-
-### Claude Code
-
-| `auth` value | Credential injected |
-|---|---|
-| `apikey` | `ANTHROPIC_API_KEY` only |
-| `oauth` | `CLAUDE_CODE_OAUTH_TOKEN` only |
-| omit | Both (CLI decides) |
-
-For subscription auth (Pro/Max/Teams/Enterprise), generate
-an OAuth token with `claude setup-token` and export
-`CLAUDE_CODE_OAUTH_TOKEN`.
-
-### Codex CLI
-
-| `auth` value | Credential injected |
-|---|---|
-| `apikey` | `OPENAI_API_KEY` only |
-| `chatgpt` | Mounts `~/.codex/auth.json` (ChatGPT subscription) |
-| omit | API key if set + auth.json if found |
-
-For ChatGPT subscription auth (Plus/Pro/Team/Enterprise),
-run `codex login` on the host to create `~/.codex/auth.json`,
-then set `"auth": "chatgpt"` in your swarm config:
+Example:
 
 ```json
 {
-  "driver": "codex-cli",
-  "agents": [{ "model": "gpt-5.4", "auth": "chatgpt" }]
+  "providers": {
+    "anthropic_oauth": {
+      "kind": "anthropic",
+      "oauth_token": "$CLAUDE_CODE_OAUTH_TOKEN"
+    },
+    "openai_key": {
+      "kind": "openai",
+      "api_key": "$OPENAI_API_KEY"
+    },
+    "openrouter": {
+      "kind": "anthropic-compatible",
+      "base_url": "https://openrouter.ai/api",
+      "bearer_token": "$OPENROUTER_API_KEY"
+    }
+  },
+  "agents": [
+    { "count": 1, "model": "claude-opus-4-6", "provider": "anthropic_oauth" },
+    { "count": 1, "model": "gpt-5.4", "driver": "codex-cli", "provider": "openai_key" },
+    { "count": 1, "model": "openai/gpt-5.4", "provider": "openrouter" }
+  ]
 }
 ```
 
-The auth file is bind-mounted read-only into containers.
-Override the path with `CODEX_AUTH_JSON=/path/to/auth.json`.
+Driver/provider compatibility:
 
-### Kimi CLI
+| Driver | Supported provider kinds | Notes |
+|---|---|---|
+| `claude-code` | `anthropic`, `anthropic-compatible` | `anthropic` accepts `api_key` or `oauth_token`; `anthropic-compatible` accepts `api_key` or `bearer_token` plus `base_url`. |
+| `codex-cli` | `openai` | Uses `api_key` or `auth_file`. |
+| `gemini-cli` | `gemini` | Requires `api_key`. |
+| `kimi-cli` | `kimi` | Requires `api_key`; optional `base_url`. |
+| `opencode` | `anthropic`, `anthropic-compatible`, `openai`, `openai-compatible`, `gemini`, `kimi` | Generates native OpenCode config/auth files inside the container. |
+| `droid` | `factory` | Requires `api_key`. |
+| `fake` | `none` | Test driver only. |
 
-Kimi uses swarm-native config fields rather than a host auth
-file. Set `"api_key": "$KIMI_API_KEY"` in the swarmfile, and
-optionally override `base_url` per group:
+Provider examples:
 
 ```json
 {
-  "driver": "kimi-cli",
-  "agents": [
-    {
-      "count": 1,
-      "model": "kimi-for-coding",
+  "providers": {
+    "anthropic_oauth": {
+      "kind": "anthropic",
+      "oauth_token": "$CLAUDE_CODE_OAUTH_TOKEN"
+    },
+    "anthropic_key": {
+      "kind": "anthropic",
+      "api_key": "$ANTHROPIC_API_KEY"
+    },
+    "openrouter": {
+      "kind": "anthropic-compatible",
+      "base_url": "https://openrouter.ai/api",
+      "bearer_token": "$OPENROUTER_API_KEY"
+    },
+    "codex_auth_file": {
+      "kind": "openai",
+      "auth_file": "~/.codex/auth.json"
+    },
+    "kimi_prod": {
+      "kind": "kimi",
       "api_key": "$KIMI_API_KEY",
-      "effort": "high"
+      "base_url": "https://api.kimi.com/coding/v1"
+    },
+    "factory_prod": {
+      "kind": "factory",
+      "api_key": "$FACTORY_API_KEY"
     }
-  ]
+  }
 }
 ```
 
-`auth_token` is not supported. `auth` may be omitted or set to
-`apikey`; other values are rejected.
+Validation happens before any container starts. Launch fails if:
 
-### OpenCode
+- a group references a missing provider
+- a provider kind is unknown
+- a provider mixes incompatible auth fields
+- a provider/driver combination is unsupported
+- an `auth_file` path does not exist
 
-OpenCode uses its native auth file only. Run `opencode login`
-on the host, or point the swarm at an existing auth file with
-`OPENCODE_AUTH_JSON`:
-
-```json
-{
-  "driver": "opencode",
-  "agents": [
-    {
-      "count": 1,
-      "model": "anthropic/claude-sonnet-4-5-20250929",
-      "effort": "high"
-    }
-  ]
-}
-```
-
-The swarm rejects non-empty `auth`, `api_key`, `auth_token`,
-and `base_url` for this driver. The auth file is mounted to
-`/home/agent/.local/share/opencode/auth.json`.
-
-### Droid
-
-Droid uses `FACTORY_API_KEY` from the host environment and does
-not accept swarm-level `auth`, `api_key`, `auth_token`, or
-`base_url` fields:
-
-```json
-{
-  "driver": "droid",
-  "agents": [
-    {
-      "count": 1,
-      "model": "glm-4.7",
-      "effort": "medium"
-    }
-  ]
-}
-```
-
-### General rules
-
-Groups with `api_key` or `auth_token` ignore the `auth`
-field; their custom credential is always used for
-Claude-compatible drivers. When neither is set, `auth`
-determines which host credential to inject.
-
-`opencode` and `droid` reject those generic swarm auth fields
-entirely. `kimi-cli` accepts `api_key` plus optional
-`base_url`, but does not use `auth_token`.
-
-The dashboard **Auth** column reflects the actual credential
-source: `key`, `oauth`, `chatgpt`, `token`, or `auto` (see
-Dashboard columns).
+The dashboard **Auth** column reflects the concrete credential
+path used for the session: `key`, `oauth`, `token`, `file`, or
+`none`.
 
 ## Git coordination
 
@@ -570,9 +562,8 @@ Stats collected per session inside each container
 Dashboard columns:
 
 - **Auth** — credential source: `key` (API key), `oauth`
-  (Claude subscription token), `chatgpt` (ChatGPT subscription),
-  `token` (Bearer / OpenRouter-style),
-  `auto` (multiple credentials present, CLI decides).
+  (Anthropic OAuth), `token` (Bearer / OpenRouter-style),
+  `file` (mounted auth file), or `none`.
 - **Ctx** — context mode: `bare` (no `.claude/`), `slim`
   (only `CLAUDE.md`), or blank for full context.
 - **Cost** — cumulative API cost in USD.
@@ -608,16 +599,30 @@ Built-in drivers:
 Set the driver globally in `swarm.json`:
 
 ```json
-{ "driver": "claude-code" }
+{
+  "driver": "claude-code",
+  "providers": {
+    "anthropic_oauth": {
+      "kind": "anthropic",
+      "oauth_token": "$CLAUDE_CODE_OAUTH_TOKEN"
+    }
+  }
+}
 ```
 
 Or per agent group:
 
 ```json
 {
+  "providers": {
+    "anthropic_oauth": {
+      "kind": "anthropic",
+      "oauth_token": "$CLAUDE_CODE_OAUTH_TOKEN"
+    }
+  },
   "agents": [
-    { "count": 2, "model": "claude-opus-4-6" },
-    { "count": 1, "model": "other-model", "driver": "other-driver" }
+    { "count": 2, "model": "claude-opus-4-6", "provider": "anthropic_oauth" },
+    { "count": 1, "model": "other-model", "provider": "anthropic_oauth", "driver": "other-driver" }
   ]
 }
 ```
@@ -673,8 +678,13 @@ swarmfile that sets `"driver": "fake"`:
   "prompt": "your-prompt.md",
   "setup": "your-setup.sh",
   "driver": "fake",
+  "providers": {
+    "fake_provider": {
+      "kind": "none"
+    }
+  },
   "agents": [
-    { "count": 1, "model": "fake" }
+    { "count": 1, "model": "fake", "provider": "fake_provider" }
   ]
 }
 ```

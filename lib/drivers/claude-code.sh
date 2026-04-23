@@ -8,7 +8,29 @@ source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 agent_default_model() { echo "claude-opus-4-6"; }
 agent_name()    { echo "Claude Code"; }
 agent_cmd()     { echo "claude"; }
-agent_validate_config() { :; }
+agent_validate_config() {
+    local _model="$1" provider_ref="$2" kind="$3" api_key="$4"
+    local oauth_token="$5" bearer_token="$6" auth_file="$7" base_url="$8" _effort="$9"
+
+    case "$kind" in
+        anthropic)
+            if [ -n "$auth_file" ] || [ -n "$bearer_token" ] || { [ -z "$api_key" ] && [ -z "$oauth_token" ]; }; then
+                echo "ERROR: driver claude-code requires provider '${provider_ref}' to supply api_key or oauth_token for kind=anthropic." >&2
+                return 1
+            fi
+            ;;
+        anthropic-compatible)
+            if [ -z "$base_url" ] || [ -n "$auth_file" ] || [ -n "$oauth_token" ] || { [ -z "$api_key" ] && [ -z "$bearer_token" ]; }; then
+                echo "ERROR: driver claude-code requires provider '${provider_ref}' kind=anthropic-compatible with base_url plus api_key or bearer_token." >&2
+                return 1
+            fi
+            ;;
+        *)
+            echo "ERROR: driver claude-code does not support provider kind '${kind}'." >&2
+            return 1
+            ;;
+    esac
+}
 
 agent_version() {
     local v
@@ -160,48 +182,35 @@ agent_docker_env() {
 }
 
 # Resolve auth credentials and emit Docker -e flags.
-# Args: <api_key> <auth_token> <auth_mode> <base_url>
-# Reads host env: ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN,
-#                 ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL
+# Args: <provider_ref> <kind> <api_key> <oauth_token> <bearer_token> <auth_file> <base_url>
 agent_docker_auth() {
-    local api_key="$1" auth_token="$2" auth_mode="$3" base_url="$4"
+    local _provider_ref="$1" kind="$2" api_key="$3" oauth_token="$4"
+    local bearer_token="$5" _auth_file="$6" base_url="$7"
+    local label=""
 
-    if [ -n "$base_url" ]; then
-        printf -- '-e\nANTHROPIC_BASE_URL=%s\n' "$base_url"
-    elif [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
-        printf -- '-e\nANTHROPIC_BASE_URL=%s\n' "$ANTHROPIC_BASE_URL"
-    fi
-    [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] \
-        && printf -- '-e\nANTHROPIC_AUTH_TOKEN=%s\n' "$ANTHROPIC_AUTH_TOKEN"
+    [ -n "$base_url" ] && printf -- '-e\nANTHROPIC_BASE_URL=%s\n' "$base_url"
 
-    local resolved_key="" label=""
-    if [ -n "$auth_token" ]; then
-        printf -- '-e\nANTHROPIC_AUTH_TOKEN=%s\n' "$auth_token"
-        label="token"
-    else
-        case "${auth_mode}" in
-            oauth)
-                printf -- '-e\nCLAUDE_CODE_OAUTH_TOKEN=%s\n' "${CLAUDE_CODE_OAUTH_TOKEN:-}"
+    case "$kind" in
+        anthropic)
+            if [ -n "$oauth_token" ]; then
+                printf -- '-e\nCLAUDE_CODE_OAUTH_TOKEN=%s\n' "$oauth_token"
                 label="oauth"
-                ;;
-            apikey)
-                resolved_key="${api_key:-${ANTHROPIC_API_KEY:-}}"
+            elif [ -n "$api_key" ]; then
+                printf -- '-e\nANTHROPIC_API_KEY=%s\n' "$api_key"
                 label="key"
-                ;;
-            *)
-                resolved_key="${api_key:-${ANTHROPIC_API_KEY:-}}"
-                [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] \
-                    && printf -- '-e\nCLAUDE_CODE_OAUTH_TOKEN=%s\n' "$CLAUDE_CODE_OAUTH_TOKEN"
-                if [ -n "$api_key" ]; then label="key"
-                elif [ -n "$resolved_key" ] && [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then label="auto"
-                elif [ -n "$resolved_key" ]; then label="key"
-                elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then label="oauth"
-                fi
-                ;;
-        esac
-    fi
+            fi
+            ;;
+        anthropic-compatible)
+            if [ -n "$bearer_token" ]; then
+                printf -- '-e\nANTHROPIC_AUTH_TOKEN=%s\n' "$bearer_token"
+                label="token"
+            elif [ -n "$api_key" ]; then
+                printf -- '-e\nANTHROPIC_API_KEY=%s\n' "$api_key"
+                label="key"
+            fi
+            ;;
+    esac
 
-    printf -- '-e\nANTHROPIC_API_KEY=%s\n' "$resolved_key"
     printf -- '-e\nSWARM_AUTH_MODE=%s\n' "$label"
 }
 
