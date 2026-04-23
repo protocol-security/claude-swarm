@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN useradd -m -s /bin/bash agent \
     && echo "agent ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/agent
 USER agent
+ENV PATH="/home/agent/.local/bin:${PATH}"
 
 # Language toolchains are installed by SWARM_SETUP, not here.
 
@@ -34,7 +35,6 @@ RUN if echo ",$SWARM_AGENTS," | grep -q ",claude-code,"; then \
 RUN if echo ",$SWARM_AGENTS," | grep -q ",kimi-cli,"; then \
         curl -LsSf https://code.kimi.com/install.sh | bash; \
     fi
-ENV PATH="/home/agent/.local/bin:${PATH}"
 
 # --- Node.js (shared by Gemini CLI, Codex CLI, OpenCode, and Droid) ---
 USER root
