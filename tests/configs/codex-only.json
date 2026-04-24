@@ -1,6 +1,12 @@
 {
   "prompt": "unused",
   "driver": "codex-cli",
+  "providers": {
+    "openai_key": {
+      "kind": "openai",
+      "api_key": "$OPENAI_API_KEY"
+    }
+  },
   "pricing": {
     "gpt-5.4":            {"input": 2.50,  "output": 15.00,  "cached": 0.25},
     "gpt-5.4-pro":        {"input": 30.00, "output": 180.00},
@@ -31,11 +37,13 @@
     {
       "count": 1,
       "model": "gpt-5.4",
+      "provider": "openai_key",
       "effort": "high"
     },
     {
       "count": 1,
       "model": "gpt-5.3-codex",
+      "provider": "openai_key",
       "effort": "low"
     }
   ]

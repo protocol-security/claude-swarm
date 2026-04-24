@@ -9,6 +9,16 @@ source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 agent_default_model() { echo "gemini-2.5-pro"; }
 agent_name()    { echo "Gemini CLI"; }
 agent_cmd()     { echo "gemini"; }
+agent_validate_config() {
+    local _model="$1" provider_ref="$2" kind="$3" api_key="$4"
+    local oauth_token="$5" bearer_token="$6" auth_file="$7" base_url="$8" _effort="$9"
+
+    if [ "$kind" != "gemini" ] || [ -z "$api_key" ] || [ -n "$oauth_token" ] \
+        || [ -n "$bearer_token" ] || [ -n "$auth_file" ] || [ -n "$base_url" ]; then
+        echo "ERROR: driver gemini-cli requires provider '${provider_ref}' kind=gemini with api_key only." >&2
+        return 1
+    fi
+}
 
 agent_version() {
     local v
@@ -165,17 +175,14 @@ agent_is_retriable() {
 agent_docker_env() { :; }
 
 # Resolve auth credentials and emit Docker -e flags.
-# Args: <api_key> <auth_token> <auth_mode> <base_url>
-# Reads host env: GEMINI_API_KEY
+# Args: <provider_ref> <kind> <api_key> <oauth_token> <bearer_token> <auth_file> <base_url>
 agent_docker_auth() {
-    local api_key="$1"
-    # auth_token=$2, auth_mode=$3, base_url=$4 — unused;
-    # Gemini CLI only supports native GEMINI_API_KEY auth.
+    local _provider_ref="$1" _kind="$2" api_key="$3"
+    # oauth_token=$4 bearer_token=$5 auth_file=$6 base_url=$7 — unused.
 
     local label=""
-    local key="${api_key:-${GEMINI_API_KEY:-}}"
-    if [ -n "$key" ]; then
-        printf -- '-e\nGEMINI_API_KEY=%s\n' "$key"
+    if [ -n "$api_key" ]; then
+        printf -- '-e\nGEMINI_API_KEY=%s\n' "$api_key"
         label="key"
     fi
 

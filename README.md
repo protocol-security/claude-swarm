@@ -14,7 +14,11 @@ Based on the agent-team pattern from
 - [Docker](https://docs.docker.com/get-docker/)
 - bash (5.0+), git, jq, bc
 - tput (ncurses) — used by the dashboard
-- An Anthropic API key, OAuth token, or compatible endpoint
+- Credentials for the driver(s) you use:
+  `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`,
+  `OPENROUTER_API_KEY`, `MINIMAX_API_KEY`,
+  `OPENAI_API_KEY` or `~/.codex/auth.json`,
+  `GEMINI_API_KEY`, `KIMI_API_KEY`, `FACTORY_API_KEY`
 
 For development: `shellcheck` for linting.
 
@@ -81,33 +85,47 @@ Place a `swarm.json` in your repo root:
   "setup": "scripts/setup.sh",
   "max_idle": 3,
   "driver": "claude-code",
+  "providers": {
+    "anthropic_oauth": {
+      "kind": "anthropic",
+      "oauth_token": "$CLAUDE_CODE_OAUTH_TOKEN"
+    },
+    "openrouter": {
+      "kind": "anthropic-compatible",
+      "base_url": "https://openrouter.ai/api",
+      "bearer_token": "$OPENROUTER_API_KEY"
+    }
+  },
   "agents": [
-    { "count": 2, "model": "claude-opus-4-6", "effort": "high" },
-    { "count": 1, "model": "claude-opus-4-6", "context": "none" },
-    { "count": 1, "model": "claude-sonnet-4-6", "prompt": "prompts/review.md" },
+    { "count": 2, "model": "claude-opus-4-6", "provider": "anthropic_oauth", "effort": "high" },
+    { "count": 1, "model": "claude-opus-4-6", "provider": "anthropic_oauth", "context": "none" },
+    { "count": 1, "model": "claude-sonnet-4-6", "provider": "anthropic_oauth", "prompt": "prompts/review.md" },
     {
       "count": 3,
       "model": "openrouter/custom",
-      "base_url": "https://openrouter.ai/api/v1",
-      "api_key": "sk-or-..."
+      "provider": "openrouter"
     }
   ],
   "post_process": {
     "prompt": "prompts/review.md",
     "model": "claude-opus-4-6",
+    "provider": "anthropic_oauth",
     "max_idle": 2
   }
 }
 ```
 
-Groups without `api_key` use `ANTHROPIC_API_KEY` or
-`CLAUDE_CODE_OAUTH_TOKEN` from the environment.
+V2 swarmfiles are fully declarative: credentials live in the
+top-level `providers` map, and each agent group or
+`post_process` selects one with `provider`.
 
-**Per-group fields:** `model`, `count`, `effort`, `context`,
-`prompt`, `auth`, `api_key`, `auth_token`, `base_url`, `tag`,
-`driver`. See [USAGE.md](USAGE.md) for
-field reference, environment variables, auth modes, context
-modes, per-group prompts, and agent drivers.
+**Per-group fields:** `model`, `count`, `provider`, `effort`,
+`context`, `prompt`, `tag`, `driver`. Provider entries define
+`kind` plus the auth/config fields that kind supports
+(`api_key`, `oauth_token`, `bearer_token`, `auth_file`,
+`base_url`). See [USAGE.md](USAGE.md) for the full schema,
+driver/provider compatibility, context modes, per-group
+prompts, and examples.
 
 ## Drivers
 
@@ -117,6 +135,7 @@ Each driver implements a fixed role interface:
 | Function | Description |
 | --- | --- |
 | `agent_name` | Human-readable name (e.g. "Claude Code") |
+| `agent_default_model` | Fallback model when config omits one |
 | `agent_cmd` | CLI command (e.g. "claude") |
 | `agent_version` | CLI version string |
 | `agent_run` | Run one session, output JSONL |
@@ -125,8 +144,15 @@ Each driver implements a fixed role interface:
 | `agent_detect_fatal` | Detect fatal errors from log + exit code |
 | `agent_is_retriable` | Detect retriable errors (rate limits, overload) |
 | `agent_activity_jq` | jq filter for activity display |
+| `agent_docker_env` | Emit driver-specific env vars for the container |
+| `agent_docker_auth` | Resolve driver auth/mounts for the container |
+| `agent_validate_config` | Reject unsupported config/auth combinations early |
+| `agent_install_cmd` | Document how the CLI is installed in Docker |
 
 Built-in drivers: `claude-code` (default), `gemini-cli`,
-`codex-cli`, `fake` (test double).  See
+`codex-cli`, `kimi-cli`, `opencode`, `droid`, `fake`
+(test double). `kimi-cli`, `opencode`, and `droid` now use
+the same provider model as the other drivers, with
+driver-specific validation at launch time. See
 [USAGE.md](USAGE.md#writing-a-new-driver) for the full interface
 and guide to writing a new driver.

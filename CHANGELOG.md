@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.22.0 — 2026-04-23
+
+- **Breaking: swarm auth moved to a unified provider model.**
+  Per-agent and `post_process` fields `auth`, `api_key`,
+  `auth_token`, and `base_url` are removed. Swarmfiles must now
+  define a top-level `providers` map and reference providers with
+  `provider` from each agent group and post-processor.
+- **OpenCode and Droid are now first-class swarm drivers.**
+  `launch.sh` resolves and validates provider references before any
+  container starts, then passes a normalized provider contract into
+  each driver. `opencode` now generates native config/auth files
+  inside the container from the selected provider instead of
+  depending on host-side setup as the primary path. `droid` now
+  uses the same declarative provider flow as the other drivers.
+- **Kimi, Codex, Gemini, and Claude migrated to the same contract.**
+  Each built-in driver now validates supported provider kinds
+  explicitly and rejects incompatible auth shapes at launch time.
+  `codex-cli` uses `openai` providers with `api_key` or
+  `auth_file`, `kimi-cli` uses `kimi`, `gemini-cli` uses
+  `gemini`, and `claude-code` uses `anthropic` or
+  `anthropic-compatible`.
+- **Docs, fixtures, and tests updated for v2 swarmfiles.**
+  Example configs under `tests/configs/` are now provider-based,
+  `tests/test_config.sh`, `tests/test_launch.sh`, and
+  `tests/test_drivers.sh` were rewritten around the new schema and
+  driver contract, and the README/usage docs now document the
+  provider system and migration.
+
+## 0.21.0 — 2026-04-23
+
+- **New built-in drivers: `kimi-cli`, `opencode`, and `droid`.**
+  The driver abstraction now supports Moonshot's Kimi CLI,
+  OpenCode, and Factory Droid alongside Claude Code, Gemini,
+  and Codex. The Docker image installs only the CLIs referenced
+  by the swarm config, and `launch.sh` now validates each
+  driver's launch-time auth/config combination before starting
+  containers.
+- **Driver-specific auth validation.** `kimi-cli` uses swarm
+  `api_key` plus optional `base_url`; `auth_token` is rejected.
+  `opencode` uses its native auth file
+  (`OPENCODE_AUTH_JSON` or `~/.local/share/opencode/auth.json`)
+  and rejects generic swarm auth fields. `droid` requires
+  `FACTORY_API_KEY` and likewise rejects generic swarm auth
+  fields.
+- **AGENTS.md bridge generalized.** Shared helpers in
+  `lib/drivers/_common.sh` now bridge Claude-style project
+  instructions into `AGENTS.md` and append git excludes for
+  drivers that need it. Codex, Kimi, and Droid use the shared
+  bridge instead of duplicating the logic.
+- **New test configs and unit coverage.** Added unit tests for
+  the three new drivers, launch-time validation coverage for
+  mixed-driver swarms, and example configs for `kimi-cli`,
+  `opencode`, `droid`, and mixed Claude+Kimi runs.
+
 ## 0.20.10 — 2026-04-23
 
 - **Fix: session-end `git pull --rebase && git push` fails every

@@ -1,5 +1,11 @@
 {
   "prompt": "unused",
+  "providers": {
+    "anthropic_oauth": {
+      "kind": "anthropic",
+      "oauth_token": "$CLAUDE_CODE_OAUTH_TOKEN"
+    }
+  },
   "docker_args": [
     "-e", "CLAUDE_CODE_SUBAGENT_MODEL=claude-opus-4-6",
     "-e", "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1",
@@ -11,9 +17,9 @@
     {
       "count": 1,
       "model": "claude-opus-4-6",
+      "provider": "anthropic_oauth",
       "effort": "max",
-      "context": "slim",
-      "auth": "oauth"
+      "context": "slim"
     }
   ]
 }

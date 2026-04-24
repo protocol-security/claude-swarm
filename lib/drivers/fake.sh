@@ -12,6 +12,16 @@ agent_default_model() { echo "fake-model"; }
 agent_name()    { echo "Fake Agent"; }
 agent_cmd()     { echo "fake-agent"; }
 agent_version() { echo "0.0.0-fake"; }
+agent_validate_config() {
+    local _model="$1" provider_ref="$2" kind="$3" api_key="$4"
+    local oauth_token="$5" bearer_token="$6" auth_file="$7" base_url="$8" _effort="$9"
+
+    if [ "$kind" != "none" ] || [ -n "$api_key" ] || [ -n "$oauth_token" ] \
+        || [ -n "$bearer_token" ] || [ -n "$auth_file" ] || [ -n "$base_url" ]; then
+        echo "ERROR: driver fake requires provider '${provider_ref}' kind=none." >&2
+        return 1
+    fi
+}
 
 # Run one fake agent session.
 # Emits a minimal but realistic JSONL stream: init, assistant, result.
@@ -64,7 +74,7 @@ JQ
 agent_docker_env() { :; }
 
 agent_docker_auth() {
-    printf -- '-e\nSWARM_AUTH_MODE=\n'
+    printf -- '-e\nSWARM_AUTH_MODE=none\n'
 }
 
 agent_install_cmd() {

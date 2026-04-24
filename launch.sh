@@ -26,8 +26,6 @@ Start options:
   --dashboard          Open the TUI dashboard after launch.
 
 Environment:
-  ANTHROPIC_API_KEY         API key (required unless OAuth).
-  CLAUDE_CODE_OAUTH_TOKEN   OAuth token for subscription auth.
   SWARM_CONFIG              Path to swarmfile (or place swarm.json in repo root).
   SWARM_TITLE               Dashboard title override.
   SWARM_SKIP_DEP_CHECK      Set to 1 to silence version warnings.
@@ -46,6 +44,31 @@ SWARM_RUN_CONTEXT="${PROJECT}@${SWARM_RUN_HASH} (${SWARM_RUN_BRANCH})"
 BARE_REPO="/tmp/${PROJECT}-upstream.git"
 IMAGE_NAME="${PROJECT}-agent"
 
+_launch_driver_fns=(agent_default_model agent_docker_env agent_docker_auth agent_validate_config)
+
+unload_launch_driver() {
+    local _fn
+    for _fn in "${_launch_driver_fns[@]}"; do
+        unset -f "$_fn" 2>/dev/null || true
+    done
+}
+
+load_launch_driver() {
+    local driver="$1"
+    local file="${SWARM_DIR}/lib/drivers/${driver}.sh"
+    local _fn
+
+    unload_launch_driver
+    # shellcheck source=lib/drivers/claude-code.sh
+    source "$file"
+    for _fn in "${_launch_driver_fns[@]}"; do
+        if ! type -t "$_fn" >/dev/null 2>&1; then
+            echo "ERROR: driver '${driver}' missing required launch function: ${_fn}" >&2
+            exit 1
+        fi
+    done
+}
+
 # Expand a single $VAR reference from the host environment.
 # Supports "$VAR" (entire value is a reference) only -- not inline
 # interpolation.  Returns the original string if no match.
@@ -56,6 +79,113 @@ expand_env_ref() {
         printf '%s' "${!varname:-}"
     else
         printf '%s' "$val"
+    fi
+}
+
+expand_path_ref() {
+    local val
+    val="$(expand_env_ref "$1")"
+    printf '%s' "${val/#\~/$HOME}"
+}
+
+has_legacy_auth_fields() {
+    jq -e '
+        def legacy:
+            has("auth") or has("api_key") or has("auth_token") or has("base_url");
+        ([.agents[]? | legacy] | any) or ((.post_process? // {}) | legacy)
+    ' "$1" >/dev/null 2>&1
+}
+
+resolve_provider_ref() {
+    local config_file="$1" provider_ref="$2"
+    jq -r --arg ref "$provider_ref" '
+        .providers[$ref] // empty |
+        [(.kind // ""),
+         (.api_key // ""),
+         (.oauth_token // ""),
+         (.bearer_token // ""),
+         (.auth_file // ""),
+         (.base_url // "")] | join("|")
+    ' "$config_file" 2>/dev/null
+}
+
+validate_provider_shape() {
+    local provider_ref="$1" kind="$2" api_key="$3" oauth_token="$4"
+    local bearer_token="$5" auth_file="$6" base_url="$7"
+    local auth_count=0
+
+    [ -n "$api_key" ] && auth_count=$((auth_count + 1))
+    [ -n "$oauth_token" ] && auth_count=$((auth_count + 1))
+    [ -n "$bearer_token" ] && auth_count=$((auth_count + 1))
+    [ -n "$auth_file" ] && auth_count=$((auth_count + 1))
+
+    if [ -z "$kind" ]; then
+        echo "ERROR: provider '${provider_ref}' is missing required field: kind." >&2
+        return 1
+    fi
+
+    case "$kind" in
+        none)
+            if [ "$auth_count" -ne 0 ] || [ -n "$base_url" ]; then
+                echo "ERROR: provider '${provider_ref}' kind=none does not accept auth or base_url fields." >&2
+                return 1
+            fi
+            ;;
+        anthropic)
+            if [ "$auth_count" -ne 1 ]; then
+                echo "ERROR: provider '${provider_ref}' kind=anthropic requires exactly one of api_key, oauth_token, or auth_file." >&2
+                return 1
+            fi
+            [ -n "$bearer_token" ] && {
+                echo "ERROR: provider '${provider_ref}' kind=anthropic does not accept bearer_token." >&2
+                return 1
+            }
+            ;;
+        anthropic-compatible)
+            if [ -z "$base_url" ]; then
+                echo "ERROR: provider '${provider_ref}' kind=anthropic-compatible requires base_url." >&2
+                return 1
+            fi
+            if [ "$auth_count" -ne 1 ] || [ -n "$oauth_token" ]; then
+                echo "ERROR: provider '${provider_ref}' kind=anthropic-compatible requires exactly one of api_key, bearer_token, or auth_file." >&2
+                return 1
+            fi
+            ;;
+        openai)
+            if [ "$auth_count" -ne 1 ] || [ -n "$oauth_token" ] || [ -n "$bearer_token" ]; then
+                echo "ERROR: provider '${provider_ref}' kind=openai requires exactly one of api_key or auth_file." >&2
+                return 1
+            fi
+            ;;
+        openai-compatible)
+            if [ -z "$base_url" ]; then
+                echo "ERROR: provider '${provider_ref}' kind=openai-compatible requires base_url." >&2
+                return 1
+            fi
+            if [ "$auth_count" -ne 1 ] || [ -n "$oauth_token" ]; then
+                echo "ERROR: provider '${provider_ref}' kind=openai-compatible requires exactly one of api_key, bearer_token, or auth_file." >&2
+                return 1
+            fi
+            ;;
+        gemini|kimi|factory)
+            if [ "$auth_count" -ne 1 ] || [ -z "$api_key" ] || [ -n "$oauth_token" ] || [ -n "$bearer_token" ] || [ -n "$auth_file" ]; then
+                echo "ERROR: provider '${provider_ref}' kind=${kind} requires api_key and does not accept oauth_token, bearer_token, or auth_file." >&2
+                return 1
+            fi
+            if [ "$kind" != "kimi" ] && [ -n "$base_url" ]; then
+                echo "ERROR: provider '${provider_ref}' kind=${kind} does not accept base_url." >&2
+                return 1
+            fi
+            ;;
+        *)
+            echo "ERROR: provider '${provider_ref}' has unknown kind '${kind}'." >&2
+            return 1
+            ;;
+    esac
+
+    if [ -n "$auth_file" ] && [ ! -f "$auth_file" ]; then
+        echo "ERROR: provider '${provider_ref}' auth_file not found: ${auth_file}" >&2
+        return 1
     fi
 }
 
@@ -85,6 +215,17 @@ if [ -z "$CONFIG_FILE" ]; then
 fi
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "ERROR: Swarmfile ${CONFIG_FILE} not found." >&2
+    exit 1
+fi
+
+if has_legacy_auth_fields "$CONFIG_FILE"; then
+    echo "ERROR: legacy auth fields auth/api_key/auth_token/base_url are no longer supported." >&2
+    echo "       Define providers under top-level \"providers\" and reference them with \"provider\"." >&2
+    exit 1
+fi
+
+if ! jq -e '.providers | type == "object"' "$CONFIG_FILE" >/dev/null 2>&1; then
+    echo "ERROR: swarmfile must define a top-level \"providers\" object." >&2
     exit 1
 fi
 
@@ -196,34 +337,62 @@ cmd_start() {
         chmod -R a+rwX "$mirror"
     done
 
-    # Build per-agent config (model|base_url|api_key|effort|auth|context|prompt|auth_token|tag|driver per line).
+    # Build per-agent config (model|provider|effort|context|prompt|tag|driver per line).
     # Uses pipe delimiter because bash IFS=$'\t' collapses consecutive tabs.
     AGENTS_CFG="/tmp/${PROJECT}-agents.cfg"
     jq -r '.tag as $dt | .driver as $dd | .agents[] | range(.count) as $i |
-        [.model, (.base_url // ""), (.api_key // ""), (.effort // ""), (.auth // ""), (.context // ""), (.prompt // ""), (.auth_token // ""), (.tag // $dt // ""), (.driver // $dd // "")] | join("|")' \
+        [.model, (.provider // ""), (.effort // ""), (.context // ""), (.prompt // ""), (.tag // $dt // ""), (.driver // $dd // "")] | join("|")' \
         "$CONFIG_FILE" > "$AGENTS_CFG"
 
     # Preflight: validate all referenced drivers exist before
     # spending time on image build and container startup.
-    local _bad_drivers="" _checked_drivers=" "
-    while IFS='|' read -r _ _ _ _ _ _ _ _ _ _drv; do
+    local _bad_drivers="" _bad_providers="" _checked_drivers=" "
+    while IFS='|' read -r _model _provider _effort _context _prompt _tag _drv; do
         _drv="${_drv:-${SWARM_DRIVER_DEFAULT}}"
+        if [ -z "$_provider" ]; then
+            _bad_providers+="  - agent model ${_model}: missing provider reference\n"
+        else
+            local _provider_line _provider_kind _provider_api_key
+            local _provider_oauth_token _provider_bearer_token _provider_auth_file _provider_base_url
+            _provider_line=$(resolve_provider_ref "$CONFIG_FILE" "$_provider")
+            if [ -z "$_provider_line" ]; then
+                _bad_providers+="  - agent model ${_model}: unknown provider '${_provider}'\n"
+            else
+                IFS='|' read -r _provider_kind _provider_api_key _provider_oauth_token \
+                    _provider_bearer_token _provider_auth_file _provider_base_url <<< "$_provider_line"
+                _provider_api_key="$(expand_env_ref "$_provider_api_key")"
+                _provider_oauth_token="$(expand_env_ref "$_provider_oauth_token")"
+                _provider_bearer_token="$(expand_env_ref "$_provider_bearer_token")"
+                _provider_auth_file="$(expand_path_ref "$_provider_auth_file")"
+                _provider_base_url="$(expand_env_ref "$_provider_base_url")"
+                if ! validate_provider_shape "$_provider" "$_provider_kind" "$_provider_api_key" \
+                    "$_provider_oauth_token" "$_provider_bearer_token" "$_provider_auth_file" "$_provider_base_url"; then
+                    _bad_providers+="  - agent model ${_model}: invalid provider '${_provider}'\n"
+                fi
+            fi
+        fi
         [[ "$_checked_drivers" == *" $_drv "* ]] && continue
         _checked_drivers+="$_drv "
         if [ ! -f "$SWARM_DIR/lib/drivers/${_drv}.sh" ]; then
             _bad_drivers+="  - ${_drv}\n"
+            continue
         fi
+        load_launch_driver "$_drv"
     done < "$AGENTS_CFG"
     if [ -n "$_bad_drivers" ]; then
         printf "ERROR: unknown driver(s):\n%b" "$_bad_drivers" >&2
         echo "Available drivers: $(ls "$SWARM_DIR/lib/drivers/" | sed 's/\.sh$//' | tr '\n' ' ')" >&2
         exit 1
     fi
+    if [ -n "$_bad_providers" ]; then
+        printf "ERROR: provider configuration error(s):\n%b" "$_bad_providers" >&2
+        exit 1
+    fi
 
     # Derive the set of agent CLIs to install from referenced drivers.
     local _swarm_agents=""
     local _seen_agents=" "
-    while IFS='|' read -r _ _ _ _ _ _ _ _ _ _drv; do
+    while IFS='|' read -r _ _ _ _ _ _ _drv; do
         _drv="${_drv:-${SWARM_DRIVER_DEFAULT}}"
         [[ "$_seen_agents" == *" $_drv "* ]] && continue
         _seen_agents+="$_drv "
@@ -259,32 +428,56 @@ cmd_start() {
     done < "/tmp/${PROJECT}-mirror-vols.txt"
 
     AGENT_IDX=0
-    while IFS='|' read -r agent_model agent_base_url agent_api_key agent_effort agent_auth agent_context agent_prompt agent_auth_token agent_tag agent_driver; do
+    while IFS='|' read -r agent_model agent_provider agent_effort agent_context agent_prompt agent_tag agent_driver; do
         AGENT_IDX=$((AGENT_IDX + 1))
         NAME="${IMAGE_NAME}-${AGENT_IDX}"
         docker rm -f "$NAME" 2>/dev/null || true
-        agent_api_key="$(expand_env_ref "$agent_api_key")"
-        agent_auth_token="$(expand_env_ref "$agent_auth_token")"
         agent_tag="$(expand_env_ref "$agent_tag")"
         agent_context="${agent_context:-full}"
         agent_driver="${agent_driver:-${SWARM_DRIVER_DEFAULT}}"
 
-        # Source the driver to access agent_docker_env.
-        # shellcheck source=lib/drivers/claude-code.sh
-        source "$SWARM_DIR/lib/drivers/${agent_driver}.sh"
+        local provider_line provider_kind provider_api_key provider_oauth_token
+        local provider_bearer_token provider_auth_file provider_base_url
+        provider_line=$(resolve_provider_ref "$CONFIG_FILE" "$agent_provider")
+        if [ -z "$provider_line" ]; then
+            echo "ERROR: unknown provider '${agent_provider}'." >&2
+            exit 1
+        fi
+        IFS='|' read -r provider_kind provider_api_key provider_oauth_token \
+            provider_bearer_token provider_auth_file provider_base_url <<< "$provider_line"
+        provider_api_key="$(expand_env_ref "$provider_api_key")"
+        provider_oauth_token="$(expand_env_ref "$provider_oauth_token")"
+        provider_bearer_token="$(expand_env_ref "$provider_bearer_token")"
+        provider_auth_file="$(expand_path_ref "$provider_auth_file")"
+        provider_base_url="$(expand_env_ref "$provider_base_url")"
+        validate_provider_shape "$agent_provider" "$provider_kind" "$provider_api_key" \
+            "$provider_oauth_token" "$provider_bearer_token" "$provider_auth_file" "$provider_base_url"
+
+        load_launch_driver "$agent_driver"
+        agent_validate_config "$agent_model" "$agent_provider" "$provider_kind" \
+            "$provider_api_key" "$provider_oauth_token" "$provider_bearer_token" \
+            "$provider_auth_file" "$provider_base_url" "$agent_effort"
         local effective_prompt="${agent_prompt:-$SWARM_PROMPT}"
 
         local ctx_label="" prompt_label="" driver_label=""
         [ "$agent_context" != "full" ] && ctx_label=" context=${agent_context}"
         [ -n "$agent_prompt" ] && prompt_label=" prompt=${agent_prompt}"
         [ "$agent_driver" != "claude-code" ] && driver_label=" driver=${agent_driver}"
-        echo "--- Launching ${NAME} (${agent_model}${agent_effort:+ effort=${agent_effort}}${ctx_label}${prompt_label}${driver_label}) ---"
+        echo "--- Launching ${NAME} (${agent_model}${agent_effort:+ effort=${agent_effort}} provider=${agent_provider}${ctx_label}${prompt_label}${driver_label}) ---"
         EXTRA_ENV=()
+
+        EXTRA_ENV+=(-e "SWARM_PROVIDER_NAME=${agent_provider}")
+        EXTRA_ENV+=(-e "SWARM_PROVIDER_KIND=${provider_kind}")
+        EXTRA_ENV+=(-e "SWARM_PROVIDER_API_KEY=${provider_api_key}")
+        EXTRA_ENV+=(-e "SWARM_PROVIDER_OAUTH_TOKEN=${provider_oauth_token}")
+        EXTRA_ENV+=(-e "SWARM_PROVIDER_BEARER_TOKEN=${provider_bearer_token}")
+        EXTRA_ENV+=(-e "SWARM_PROVIDER_BASE_URL=${provider_base_url}")
 
         # Delegate auth credential resolution to the driver.
         while IFS= read -r _ae; do
             [ -n "$_ae" ] && EXTRA_ENV+=("$_ae")
-        done < <(agent_docker_auth "$agent_api_key" "$agent_auth_token" "$agent_auth" "$agent_base_url")
+        done < <(agent_docker_auth "$agent_provider" "$provider_kind" "$provider_api_key" \
+            "$provider_oauth_token" "$provider_bearer_token" "$provider_auth_file" "$provider_base_url")
 
         local eff="${agent_effort:-}"
         if [ -n "$eff" ]; then
@@ -437,23 +630,22 @@ cmd_wait() {
 }
 
 cmd_post_process() {
-    local pp_prompt pp_model pp_base_url pp_api_key pp_effort pp_auth pp_auth_token pp_tag pp_driver pp_max_idle
+    local pp_prompt pp_model pp_provider pp_effort pp_tag pp_driver pp_max_idle
     pp_prompt=$(jq -r '.post_process.prompt // empty' "$CONFIG_FILE")
     pp_max_idle=$(jq -r '.post_process.max_idle // .max_idle // 3' "$CONFIG_FILE")
     pp_model=$(jq -r '.post_process.model // "claude-opus-4-6"' "$CONFIG_FILE")
-    pp_base_url=$(jq -r '.post_process.base_url // empty' "$CONFIG_FILE")
-    pp_api_key=$(jq -r '.post_process.api_key // empty' "$CONFIG_FILE")
-    pp_api_key="$(expand_env_ref "$pp_api_key")"
-    pp_auth_token=$(jq -r '.post_process.auth_token // empty' "$CONFIG_FILE")
-    pp_auth_token="$(expand_env_ref "$pp_auth_token")"
+    pp_provider=$(jq -r '.post_process.provider // empty' "$CONFIG_FILE")
     pp_effort=$(jq -r '.post_process.effort // empty' "$CONFIG_FILE")
-    pp_auth=$(jq -r '.post_process.auth // empty' "$CONFIG_FILE")
     pp_tag=$(jq -r '.post_process.tag // .tag // empty' "$CONFIG_FILE")
     pp_tag="$(expand_env_ref "$pp_tag")"
     pp_driver=$(jq -r '.post_process.driver // .driver // "claude-code"' "$CONFIG_FILE")
 
     if [ -z "$pp_prompt" ]; then
         echo "ERROR: post_process.prompt is not set in ${CONFIG_FILE}." >&2
+        exit 1
+    fi
+    if [ -z "$pp_provider" ]; then
+        echo "ERROR: post_process.provider is required when post_process is configured." >&2
         exit 1
     fi
 
@@ -485,14 +677,39 @@ cmd_post_process() {
     done < "/tmp/${PROJECT}-pp-vols.txt"
     rm -f "/tmp/${PROJECT}-pp-vols.txt"
 
-    # Source the driver to access agent_docker_auth / agent_docker_env.
-    # shellcheck source=lib/drivers/claude-code.sh
-    source "$SWARM_DIR/lib/drivers/${pp_driver}.sh"
+    local pp_provider_line pp_provider_kind pp_provider_api_key pp_provider_oauth_token
+    local pp_provider_bearer_token pp_provider_auth_file pp_provider_base_url
+    pp_provider_line=$(resolve_provider_ref "$CONFIG_FILE" "$pp_provider")
+    if [ -z "$pp_provider_line" ]; then
+        echo "ERROR: unknown post-process provider '${pp_provider}'." >&2
+        exit 1
+    fi
+    IFS='|' read -r pp_provider_kind pp_provider_api_key pp_provider_oauth_token \
+        pp_provider_bearer_token pp_provider_auth_file pp_provider_base_url <<< "$pp_provider_line"
+    pp_provider_api_key="$(expand_env_ref "$pp_provider_api_key")"
+    pp_provider_oauth_token="$(expand_env_ref "$pp_provider_oauth_token")"
+    pp_provider_bearer_token="$(expand_env_ref "$pp_provider_bearer_token")"
+    pp_provider_auth_file="$(expand_path_ref "$pp_provider_auth_file")"
+    pp_provider_base_url="$(expand_env_ref "$pp_provider_base_url")"
+    validate_provider_shape "$pp_provider" "$pp_provider_kind" "$pp_provider_api_key" \
+        "$pp_provider_oauth_token" "$pp_provider_bearer_token" "$pp_provider_auth_file" "$pp_provider_base_url"
+
+    load_launch_driver "$pp_driver"
+    agent_validate_config "$pp_model" "$pp_provider" "$pp_provider_kind" \
+        "$pp_provider_api_key" "$pp_provider_oauth_token" "$pp_provider_bearer_token" \
+        "$pp_provider_auth_file" "$pp_provider_base_url" "$pp_effort"
 
     local EXTRA_ENV=()
+    EXTRA_ENV+=(-e "SWARM_PROVIDER_NAME=${pp_provider}")
+    EXTRA_ENV+=(-e "SWARM_PROVIDER_KIND=${pp_provider_kind}")
+    EXTRA_ENV+=(-e "SWARM_PROVIDER_API_KEY=${pp_provider_api_key}")
+    EXTRA_ENV+=(-e "SWARM_PROVIDER_OAUTH_TOKEN=${pp_provider_oauth_token}")
+    EXTRA_ENV+=(-e "SWARM_PROVIDER_BEARER_TOKEN=${pp_provider_bearer_token}")
+    EXTRA_ENV+=(-e "SWARM_PROVIDER_BASE_URL=${pp_provider_base_url}")
     while IFS= read -r _ae; do
         [ -n "$_ae" ] && EXTRA_ENV+=("$_ae")
-    done < <(agent_docker_auth "$pp_api_key" "$pp_auth_token" "$pp_auth" "$pp_base_url")
+    done < <(agent_docker_auth "$pp_provider" "$pp_provider_kind" "$pp_provider_api_key" \
+        "$pp_provider_oauth_token" "$pp_provider_bearer_token" "$pp_provider_auth_file" "$pp_provider_base_url")
 
     if [ -n "$pp_effort" ]; then
         while IFS= read -r _de; do

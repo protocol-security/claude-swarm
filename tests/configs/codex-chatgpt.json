@@ -1,6 +1,12 @@
 {
   "prompt": "unused",
   "driver": "codex-cli",
+  "providers": {
+    "openai_file": {
+      "kind": "openai",
+      "auth_file": "~/.codex/auth.json"
+    }
+  },
   "pricing": {
     "gpt-5.4":       {"input": 2.5,  "output": 15.0, "cached": 0.25},
     "gpt-5.3-codex": {"input": 1.75, "output": 14.0, "cached": 0.175}
@@ -9,13 +15,13 @@
     {
       "count": 1,
       "model": "gpt-5.4",
-      "auth": "chatgpt",
+      "provider": "openai_file",
       "effort": "high"
     },
     {
       "count": 1,
       "model": "gpt-5.3-codex",
-      "auth": "chatgpt"
+      "provider": "openai_file"
     }
   ]
 }

@@ -1,16 +1,27 @@
 {
   "prompt": "unused",
+  "providers": {
+    "anthropic_oauth": {
+      "kind": "anthropic",
+      "oauth_token": "$CLAUDE_CODE_OAUTH_TOKEN"
+    },
+    "gemini_key": {
+      "kind": "gemini",
+      "api_key": "$GEMINI_API_KEY"
+    }
+  },
   "agents": [
     {
       "count": 2,
       "model": "claude-opus-4-6",
       "driver": "claude-code",
-      "auth": "oauth"
+      "provider": "anthropic_oauth"
     },
     {
       "count": 1,
       "model": "gemini-2.5-pro",
-      "driver": "gemini-cli"
+      "driver": "gemini-cli",
+      "provider": "gemini_key"
     }
   ]
 }

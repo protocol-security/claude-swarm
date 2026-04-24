@@ -106,12 +106,13 @@ _reap_watchdog() {
 #   indefinitely.  The harness blocks on the pipe and no progress
 #   is made until the container is externally killed.
 #
-#   `setsid` gives the CLI a fresh session/process group (pgid =
-#   cmd_pid), so every descendant it forks inherits that pgid.
-#   After `wait` returns, `kill -KILL -- -$cmd_pid` signals the
-#   entire group, forcing any lingering descendant to exit and
-#   release its pipe FD.  The downstream pipeline then observes
-#   EOF and drains cleanly.
+#   `setsid` gives the CLI a fresh session/process group.  `_run_reaped`
+#   launches a tiny wrapper inside that session which records its pid
+#   (the process-group leader) and then runs the CLI.  Every descendant
+#   the CLI forks inherits that pgid, and after `wait` returns,
+#   `kill -KILL -- -$cmd_pid` signals the entire group, forcing any
+#   lingering descendant to exit and release its pipe FD.  The
+#   downstream pipeline then observes EOF and drains cleanly.
 #
 # WHY AN ACTIVITY WATCHDOG:
 #   The process-group kill only fires after `wait "$_cmd_pid"`
@@ -164,9 +165,34 @@ _run_reaped() {
     fi
 
     {
-        setsid "$@" 2>"${logfile}.err" &
-        local _cmd_pid=$!
+        local _pidfile="${logfile}.pid"
+        local _statusfile="${logfile}.status"
+        rm -f "$_pidfile"
+        rm -f "$_statusfile"
+        setsid -w bash -c '
+            printf "%s\n" "$$" > "$1"
+            shift
+            _statusfile="$1"
+            shift
+            "$@"
+            _ec=$?
+            printf "%s\n" "$_ec" > "$_statusfile"
+            exit "$_ec"
+        ' bash "$_pidfile" "$_statusfile" "$@" 2>"${logfile}.err" &
+        local _setsid_pid=$!
+        local _cmd_pid=""
         local _wd_pid=""
+        local _i=0
+        while [ "$_i" -lt 50 ]; do
+            if [ -s "$_pidfile" ]; then
+                IFS= read -r _cmd_pid < "$_pidfile"
+                break
+            fi
+            kill -0 "$_setsid_pid" 2>/dev/null || break
+            sleep 0.02
+            _i=$((_i + 1))
+        done
+        [ -n "$_cmd_pid" ] || _cmd_pid="$_setsid_pid"
         if [ "$_wd_timeout" -gt 0 ]; then
             # Route watchdog diagnostics into the CLI's stderr
             # file so operators inspecting <logfile>.err can tell
@@ -183,7 +209,10 @@ _run_reaped() {
         # holding the tee pipe open (empirically observed on
         # exit-42 in unit tests).
         local _ec=0
-        wait "$_cmd_pid" || _ec=$?
+        wait "$_setsid_pid" || _ec=$?
+        if [ -s "$_statusfile" ]; then
+            IFS= read -r _ec < "$_statusfile"
+        fi
         # Group kill: -$_cmd_pid targets the process group whose
         # leader is the setsid'd command.  Swallow errors -- an
         # already-empty group is fine.
@@ -194,6 +223,8 @@ _run_reaped() {
             kill "$_wd_pid" 2>/dev/null || true
             wait "$_wd_pid" 2>/dev/null || true
         fi
+        rm -f "$_pidfile"
+        rm -f "$_statusfile"
         exit "$_ec"
     } | "${_tee_cmd[@]}"
     return "${PIPESTATUS[0]}"
@@ -228,4 +259,32 @@ _extract_jsonl_stats() {
     cache_cr="${cache_cr:-0}"
     printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s" \
         "$cost" "$tok_in" "$tok_out" "$cache_rd" "$cache_cr" "$dur" "$api_ms" "$turns"
+}
+
+_append_git_exclude() {
+    local workspace="$1" entry="$2"
+    local exclude="${workspace}/.git/info/exclude"
+    mkdir -p "${workspace}/.git/info"
+    touch "$exclude"
+    grep -qxF "$entry" "$exclude" 2>/dev/null || echo "$entry" >> "$exclude"
+}
+
+# Bridge Claude-style project instructions into AGENTS.md for CLIs
+# that do not read .claude/CLAUDE.md natively.
+_bridge_agents_md() {
+    local workspace="$1"
+    local src=""
+
+    [ -f "${workspace}/AGENTS.md" ] && return 0
+
+    if [ -f "${workspace}/.claude/CLAUDE.md" ]; then
+        src="${workspace}/.claude/CLAUDE.md"
+    elif [ -f "${workspace}/CLAUDE.md" ]; then
+        src="${workspace}/CLAUDE.md"
+    fi
+
+    [ -n "$src" ] || return 0
+
+    cp "$src" "${workspace}/AGENTS.md"
+    _append_git_exclude "$workspace" "AGENTS.md"
 }

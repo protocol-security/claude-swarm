@@ -14,12 +14,14 @@ export OPENROUTER_API_KEY="sk-or-v1-..."
 export MINIMAX_API_KEY="sk-api-..."
 export GEMINI_API_KEY="AI..."
 export OPENAI_API_KEY="sk-..."
+export KIMI_API_KEY="sk-kimi-..."
+export FACTORY_API_KEY="fk-..."
 ```
 
 Verify they're set:
 
 ```bash
-for v in ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN OPENROUTER_API_KEY MINIMAX_API_KEY GEMINI_API_KEY OPENAI_API_KEY; do
+for v in ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN OPENROUTER_API_KEY MINIMAX_API_KEY GEMINI_API_KEY OPENAI_API_KEY KIMI_API_KEY FACTORY_API_KEY; do
   printf "%-30s %s\n" "$v" "${!v:+(set)}"
 done
 ```
@@ -39,9 +41,13 @@ done
 | `driver-post-process.json` | 2x gemini-2.5-pro (+ flash PP) | gemini-cli | `GEMINI_API_KEY` |
 | `heterogeneous-kitchen-sink.json` | Opus + 5x Gemini + Sonnet (+ PP) | mixed | `CLAUDE_CODE_OAUTH_TOKEN` + `ANTHROPIC_API_KEY` + `GEMINI_API_KEY` |
 | `codex-only.json` | 2x gpt-5.4 | codex-cli | `OPENAI_API_KEY` |
-| `codex-chatgpt.json` | 2x gpt-5.4 (chatgpt auth) | codex-cli | `~/.codex/auth.json` |
-| `codex-auth-mixed.json` | gpt-5.4 (chatgpt) + gpt-5.3-codex (apikey) + gpt-5.4 (auto) | codex-cli | `~/.codex/auth.json` + `OPENAI_API_KEY` |
+| `codex-chatgpt.json` | 2x gpt-5.4 via `auth_file` provider | codex-cli | `~/.codex/auth.json` |
+| `codex-auth-mixed.json` | gpt-5.4 via `auth_file` + gpt-5.3-codex via `api_key` + gpt-5.4 via `api_key` | codex-cli | `~/.codex/auth.json` + `OPENAI_API_KEY` |
 | `codex-mixed.json` | Opus + gpt-5.4 + gpt-5.3-codex + gpt-5.2 | mixed | `CLAUDE_CODE_OAUTH_TOKEN` + `OPENAI_API_KEY` |
+| `kimi-only.json` | 2x kimi-for-coding | kimi-cli | `KIMI_API_KEY` |
+| `opencode-only.json` | 2x anthropic/claude-sonnet-4-5-20250929 | opencode | `CLAUDE_CODE_OAUTH_TOKEN` |
+| `droid-only.json` | 2x glm-4.7 | droid | `FACTORY_API_KEY` |
+| `mixed-kimi-claude.json` | Opus + kimi-for-coding (+ Kimi PP) | mixed | `CLAUDE_CODE_OAUTH_TOKEN` + `KIMI_API_KEY` |
 
 ## Usage
 
@@ -60,7 +66,15 @@ done
 ./tests/test.sh --config tests/configs/codex-chatgpt.json
 ./tests/test.sh --config tests/configs/codex-auth-mixed.json
 ./tests/test.sh --config tests/configs/codex-mixed.json
+./tests/test.sh --config tests/configs/kimi-only.json
+./tests/test.sh --config tests/configs/opencode-only.json
+./tests/test.sh --config tests/configs/droid-only.json
+./tests/test.sh --config tests/configs/mixed-kimi-claude.json
 ```
 
 The test runner injects its own prompt and setup script into the config,
 so the `"prompt": "unused"` field is overwritten at runtime.
+
+All checked-in configs are v2 swarmfiles: credentials live in the
+top-level `providers` map, and each agent or post-processor chooses
+one with `provider`.

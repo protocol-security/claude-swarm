@@ -9,6 +9,16 @@ source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 agent_default_model() { echo "gpt-5.4"; }
 agent_name()    { echo "Codex CLI"; }
 agent_cmd()     { echo "codex"; }
+agent_validate_config() {
+    local _model="$1" provider_ref="$2" kind="$3" api_key="$4"
+    local oauth_token="$5" bearer_token="$6" auth_file="$7" base_url="$8" _effort="$9"
+
+    if [ "$kind" != "openai" ] || [ -n "$oauth_token" ] || [ -n "$bearer_token" ] || [ -n "$base_url" ] \
+        || { [ -z "$api_key" ] && [ -z "$auth_file" ]; }; then
+        echo "ERROR: driver codex-cli requires provider '${provider_ref}' kind=openai with api_key or auth_file." >&2
+        return 1
+    fi
+}
 
 agent_version() {
     local v
@@ -64,18 +74,7 @@ TOML
 
     # Codex reads AGENTS.md for project instructions, not
     # .claude/CLAUDE.md.  Bridge the gap when AGENTS.md is absent.
-    if [ ! -f "${_workspace}/AGENTS.md" ]; then
-        local _src=""
-        [ -f "${_workspace}/.claude/CLAUDE.md" ] \
-            && _src="${_workspace}/.claude/CLAUDE.md"
-        [ -z "$_src" ] && [ -f "${_workspace}/CLAUDE.md" ] \
-            && _src="${_workspace}/CLAUDE.md"
-        if [ -n "$_src" ]; then
-            cp "$_src" "${_workspace}/AGENTS.md"
-            mkdir -p "${_workspace}/.git/info"
-            echo "AGENTS.md" >> "${_workspace}/.git/info/exclude"
-        fi
-    fi
+    _bridge_agents_md "$_workspace"
 
     # Codex reads skills from .agents/skills/, not .claude/skills/.
     # Symlink when the Codex location is absent (Codex supports
@@ -85,8 +84,7 @@ TOML
         && [ -d "${_workspace}/.claude/skills" ]; then
         mkdir -p "${_workspace}/.agents"
         ln -s "../.claude/skills" "${_workspace}/.agents/skills"
-        mkdir -p "${_workspace}/.git/info"
-        echo ".agents/" >> "${_workspace}/.git/info/exclude"
+        _append_git_exclude "$_workspace" ".agents/"
     fi
 
     if [ -n "${OPENAI_API_KEY:-}" ]; then
@@ -247,58 +245,23 @@ agent_docker_env() {
 }
 
 # Resolve auth credentials and emit Docker flags.
-# Args: <api_key> <auth_token> <auth_mode> <base_url>
-# Reads host env: OPENAI_API_KEY, CODEX_AUTH_JSON
-#
-# Auth modes:
-#   chatgpt  — Mount ~/.codex/auth.json (ChatGPT subscription).
-#   apikey   — Use OPENAI_API_KEY only.
-#   (empty)  — Auto-detect: auth.json if found, else API key.
+# Args: <provider_ref> <kind> <api_key> <oauth_token> <bearer_token> <auth_file> <base_url>
 agent_docker_auth() {
-    local api_key="$1" _auth_token="$2" auth_mode="$3" _base_url="$4"
+    local _provider_ref="$1" _kind="$2" api_key="$3" _oauth_token="$4"
+    local _bearer_token="$5" auth_file="$6" _base_url="$7"
 
     local label=""
-    local key="${api_key:-${OPENAI_API_KEY:-}}"
-    local auth_json="${CODEX_AUTH_JSON:-${HOME}/.codex/auth.json}"
+    local auth_json="$auth_file"
 
-    # Guard: detect a corrupted auth.json (directory instead of file),
-    # which older code or a stale Docker -v mount may have created.
-    if [ -d "$auth_json" ]; then
-        echo "WARNING: ${auth_json} is a directory (should be a file)." >&2
-        echo "  Fix with: sudo rm -rf '${auth_json}'" >&2
-    fi
-
-    # Use --mount instead of -v so Docker errors out (rather than
-    # silently creating a directory) if the source file is missing.
     local _mount_fmt='--mount\ntype=bind,source=%s,target=/home/agent/.codex/auth.json,readonly\n'
 
-    case "${auth_mode}" in
-        chatgpt)
-            if [ -f "$auth_json" ]; then
-                printf -- "$_mount_fmt" "$auth_json"
-                label="chatgpt"
-            else
-                echo "WARNING: auth=chatgpt but ${auth_json} not found" >&2
-            fi
-            ;;
-        apikey)
-            if [ -n "$key" ]; then
-                printf -- '-e\nOPENAI_API_KEY=%s\n' "$key"
-                label="key"
-            fi
-            ;;
-        *)
-            if [ -n "$key" ]; then
-                printf -- '-e\nOPENAI_API_KEY=%s\n' "$key"
-                label="key"
-            fi
-            if [ -f "$auth_json" ]; then
-                printf -- "$_mount_fmt" "$auth_json"
-                if [ -n "$label" ]; then label="auto"
-                else label="chatgpt"; fi
-            fi
-            ;;
-    esac
+    if [ -n "$api_key" ]; then
+        printf -- '-e\nOPENAI_API_KEY=%s\n' "$api_key"
+        label="key"
+    elif [ -f "$auth_json" ]; then
+        printf -- "$_mount_fmt" "$auth_json"
+        label="file"
+    fi
 
     printf -- '-e\nSWARM_AUTH_MODE=%s\n' "$label"
 }

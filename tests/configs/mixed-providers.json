@@ -1,25 +1,39 @@
 {
   "prompt": "unused",
+  "providers": {
+    "anthropic_oauth": {
+      "kind": "anthropic",
+      "oauth_token": "$CLAUDE_CODE_OAUTH_TOKEN"
+    },
+    "openrouter": {
+      "kind": "anthropic-compatible",
+      "base_url": "https://openrouter.ai/api",
+      "bearer_token": "$OPENROUTER_API_KEY"
+    },
+    "minimax": {
+      "kind": "anthropic-compatible",
+      "base_url": "https://api.minimax.io/anthropic",
+      "api_key": "$MINIMAX_API_KEY"
+    }
+  },
   "agents": [
     {
       "count": 1,
       "model": "claude-opus-4-6",
+      "provider": "anthropic_oauth",
       "effort": "high",
-      "auth": "oauth",
       "tag": "anchor"
     },
     {
       "count": 1,
       "model": "openai/gpt-5.4",
-      "base_url": "https://openrouter.ai/api",
-      "auth_token": "$OPENROUTER_API_KEY",
+      "provider": "openrouter",
       "tag": "openai"
     },
     {
       "count": 1,
       "model": "MiniMax-M2.5",
-      "base_url": "https://api.minimax.io/anthropic",
-      "api_key": "$MINIMAX_API_KEY",
+      "provider": "minimax",
       "tag": "minimax"
     }
   ]
