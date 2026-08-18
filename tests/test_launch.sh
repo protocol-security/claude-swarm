@@ -1013,6 +1013,48 @@ JSON
 assert_eq "codex version absent" "" \
     "$(jq -r '.codex_cli_version // empty' "$TMPDIR/codex_no_version.json")"
 
+cat > "$TMPDIR/kimi_pinned.json" <<'JSON'
+{
+  "prompt": "unused",
+  "kimi_cli_version": "0.28.0",
+  "agents": [{"count": 1, "driver": "kimi-cli", "model": "kimi-code/kimi-for-coding"}]
+}
+JSON
+
+assert_eq "kimi version present" "0.28.0" \
+    "$(jq -r '.kimi_cli_version // empty' "$TMPDIR/kimi_pinned.json")"
+
+cat > "$TMPDIR/kimi_no_version.json" <<'JSON'
+{
+  "prompt": "unused",
+  "agents": [{"count": 1, "driver": "kimi-cli", "model": "kimi-code/kimi-for-coding"}]
+}
+JSON
+
+assert_eq "kimi version absent" "" \
+    "$(jq -r '.kimi_cli_version // empty' "$TMPDIR/kimi_no_version.json")"
+
+cat > "$TMPDIR/qwen_pinned.json" <<'JSON'
+{
+  "prompt": "unused",
+  "qwen_cli_version": "0.21.5",
+  "agents": [{"count": 1, "driver": "qwen-cli", "model": "qwen3.8-max"}]
+}
+JSON
+
+assert_eq "qwen version present" "0.21.5" \
+    "$(jq -r '.qwen_cli_version // empty' "$TMPDIR/qwen_pinned.json")"
+
+cat > "$TMPDIR/qwen_no_version.json" <<'JSON'
+{
+  "prompt": "unused",
+  "agents": [{"count": 1, "driver": "qwen-cli", "model": "qwen3.8-max"}]
+}
+JSON
+
+assert_eq "qwen version absent" "" \
+    "$(jq -r '.qwen_cli_version // empty' "$TMPDIR/qwen_no_version.json")"
+
 # ============================================================
 echo ""
 echo "=== 30. Top-level tag inheritance ==="
@@ -1216,7 +1258,7 @@ echo "=== 34. Post-process creates bare repo when missing ==="
 pp_ensure_bare_repo() {
     local repo_root="$1" bare_repo="$2"
     if [ ! -d "$bare_repo" ]; then
-        git clone --bare "$repo_root" "$bare_repo" 2>/dev/null
+        git clone --bare --no-hardlinks "$repo_root" "$bare_repo" 2>/dev/null
         git -C "$bare_repo" branch agent-work HEAD 2>/dev/null || true
         git -C "$bare_repo" symbolic-ref HEAD refs/heads/agent-work
     fi
@@ -1253,7 +1295,7 @@ rm -rf "$_pp_repo" "$_pp_bare"
 
 # ============================================================
 echo ""
-echo "=== 35. Bare repo is world-writable after creation ==="
+echo "=== 35. Bare repo is independent and world-writable after creation ==="
 
 # Simulate the bare-repo creation + permission fix from cmd_start.
 _wr_repo="$TMPDIR/wr-src-repo"
@@ -1263,10 +1305,11 @@ git -C "$_wr_repo" \
     -c user.name="test" -c user.email="test@test" \
     -c commit.gpgsign=false \
     commit --allow-empty -m "init" -q
+git -C "$_wr_repo" gc --quiet
 
 _wr_bare="$TMPDIR/wr-bare-test.git"
 rm -rf "$_wr_bare"
-git clone --bare "$_wr_repo" "$_wr_bare" 2>/dev/null
+git clone --bare --no-hardlinks "$_wr_repo" "$_wr_bare" 2>/dev/null
 git -C "$_wr_bare" branch agent-work HEAD 2>/dev/null || true
 git -C "$_wr_bare" symbolic-ref HEAD refs/heads/agent-work
 git -C "$_wr_bare" config core.sharedRepository world
@@ -1289,6 +1332,28 @@ _wr_pack_perms=$(stat -c '%A' "$_wr_bare/objects/pack" 2>/dev/null \
     || stat -f '%Sp' "$_wr_bare/objects/pack" 2>/dev/null)
 _wr_pack_w=$(echo "$_wr_pack_perms" | grep -c 'w.$' || true)
 assert_eq "bare repo objects/pack/ is world-writable" "1" "$_wr_pack_w"
+
+# The source checkout and bare repo cross a Docker Desktop mount boundary in
+# production. Independent packs remove the shared-inode dependency.
+_wr_src_pack=$(find "$_wr_repo/.git/objects/pack" -name '*.pack' -print -quit)
+_wr_dst_pack=$(find "$_wr_bare/objects/pack" -name '*.pack' -print -quit)
+_wr_storage_independent=true
+if [ "$_wr_src_pack" -ef "$_wr_dst_pack" ]; then
+    _wr_storage_independent=false
+fi
+assert_eq "bare repo pack is not hardlinked to source" "true" \
+    "$_wr_storage_independent"
+
+# Pin the live helper too; the mechanism test above must not drift away from
+# the command launch.sh actually uses.
+_wr_create_body=$(awk '
+    /^create_bare_repo\(\)[[:space:]]*\{/ { p = 1 }
+    p { print }
+    p && /^\}[[:space:]]*$/ { exit }
+' "$TESTS_DIR/../launch.sh")
+assert_eq "live create_bare_repo disables hardlinks" "1" \
+    "$(printf '%s\n' "$_wr_create_body" \
+        | grep -cF 'git clone --bare --no-hardlinks' || true)"
 
 rm -rf "$_wr_repo" "$_wr_bare"
 
@@ -1630,6 +1695,22 @@ EOF
 assert_eq "codex-only top-level driver" "codex-cli" \
     "$(compute_swarm_agents "$TMPDIR/csa_codex.json")"
 
+cat > "$TMPDIR/csa_kimi.json" <<'EOF'
+{ "prompt": "p.md",
+  "driver": "kimi-cli",
+  "agents": [{ "count": 1, "model": "kimi-code/kimi-for-coding" }] }
+EOF
+assert_eq "kimi-only top-level driver" "kimi-cli" \
+    "$(compute_swarm_agents "$TMPDIR/csa_kimi.json")"
+
+cat > "$TMPDIR/csa_qwen.json" <<'EOF'
+{ "prompt": "p.md",
+  "driver": "qwen-cli",
+  "agents": [{ "count": 1, "model": "qwen3.8-max" }] }
+EOF
+assert_eq "qwen-only top-level driver" "qwen-cli" \
+    "$(compute_swarm_agents "$TMPDIR/csa_qwen.json")"
+
 cat > "$TMPDIR/csa_mixed.json" <<'EOF'
 { "prompt": "p.md",
   "agents": [
@@ -1764,6 +1845,12 @@ assert_eq "build_image forwards CLAUDE_CODE_VERSION build-arg" "1" \
 assert_eq "build_image forwards CODEX_CLI_VERSION build-arg" "1" \
     "$(printf '%s\n' "$_bi_body" \
         | grep -cE -- '--build-arg "CODEX_CLI_VERSION=' || true)"
+assert_eq "build_image forwards KIMI_CLI_VERSION build-arg" "1" \
+    "$(printf '%s\n' "$_bi_body" \
+        | grep -cE -- '--build-arg "KIMI_CLI_VERSION=' || true)"
+assert_eq "build_image forwards QWEN_CLI_VERSION build-arg" "1" \
+    "$(printf '%s\n' "$_bi_body" \
+        | grep -cE -- '--build-arg "QWEN_CLI_VERSION=' || true)"
 
 # ============================================================
 echo ""

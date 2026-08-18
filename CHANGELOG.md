@@ -2,6 +2,54 @@
 
 ## Unreleased
 
+- **Qwen Code CLI driver.** New `qwen-cli` driver
+  (`lib/drivers/qwen-cli.sh`) implements the full interface for
+  Alibaba's Qwen Code CLI: headless mode with
+  `qwen -p --output-format stream-json --yolo`, activity parsing
+  from stream-json tool calls, fatal/retriable error detection,
+  and reasoning effort support via `model.reasoningEffort`.
+  stream-json carries usage but no cost, so cost comes from the
+  swarmfile `pricing` map.  The CLI folds cache reads into
+  `input_tokens`; the driver subtracts them so `tok_in` matches
+  Claude's disjoint buckets and cache reads are not billed twice.
+- **Qwen auth modes.** Qwen agents authenticate via
+  `"auth": "apikey"` (host `QWEN_API_KEY`/`DASHSCOPE_API_KEY`
+  forwarded as `DASHSCOPE_API_KEY`; the driver synthesizes
+  `~/.qwen/settings.json` with an openai-protocol provider entry,
+  so no login state is needed — the CI-friendly path) or
+  `"auth": "oauth"` (read-only mount of the host `~/.qwen` home
+  dir after `qwen` `/auth` or `bl config agent`; each container
+  copies it to a writable location on startup). Auto-detection
+  when both are present. Set the per-group `base_url` to match
+  the account region: ModelStudio keys are region-scoped and the
+  CLI's built-in default endpoint is cn-beijing, which returns
+  401 for international accounts.
+- **Build: `qwen_cli_version` swarmfile field.** Pins the Qwen
+  Code CLI version installed in the agent image, mirroring
+  `codex_cli_version`.
+- **Kimi Code CLI driver.** New `kimi-cli` driver
+  (`lib/drivers/kimi-cli.sh`) implements the full interface for
+  Moonshot AI's Kimi Code CLI: headless mode with
+  `kimi -p --output-format stream-json`, activity parsing from
+  stream-json tool calls, fatal/retriable error detection, and
+  thinking effort support via `KIMI_MODEL_THINKING_EFFORT`.
+  stream-json carries no usage summary; token usage is summed
+  from the session `wire.jsonl` the CLI persists (one
+  `usage.record` per LLM step), attributed by run-start mark so a
+  staged host home or an earlier retry is never counted. Cache
+  creation folds into `tok_in` (billed as a cache miss upstream);
+  cost comes from the swarmfile `pricing` map.
+- **Kimi auth modes.** Kimi agents authenticate via
+  `"auth": "apikey"` (host `KIMI_API_KEY` forwarded as
+  `KIMI_MODEL_API_KEY`, which makes the CLI synthesize an in-memory
+  provider) or `"auth": "oauth"` (read-only mount of the host
+  `~/.kimi-code` data dir after `kimi login`; each container copies
+  it to a writable location on startup). Auto-detection when both
+  are present.
+- **Build: `kimi_cli_version` swarmfile field.** Pins the Kimi
+  Code CLI version installed in the agent image, mirroring
+  `codex_cli_version`.
+
 ## 0.22.0 — 2026-06-08
 
 - **Build: base the agent image on Debian trixie.** Replaces

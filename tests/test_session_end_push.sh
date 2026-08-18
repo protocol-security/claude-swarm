@@ -419,6 +419,15 @@ SEP_BODY=$(awk '/^_session_end_push\(\) \{/,/^\}$/' \
 assert_contains "_session_end_push updates AFTER on success" \
     'AFTER=$(git rev-parse origin/agent-work)' "$SEP_BODY"
 
+# The ordinary session-end path must fail closed. Otherwise a total push
+# failure leaves commits only in the ephemeral container, increments the idle
+# counter, and exits 0 as though triage completed successfully.
+assert_eq "happy path checks session-end push result" "1" \
+    "$(grep -cE '^    if ! _session_end_push; then$' "$HARNESS_FILE")"
+assert_eq "happy path exits when commits cannot be shipped" "1" \
+    "$(grep -cF 'session-end push failed; exiting with unshipped commits preserved' \
+        "$HARNESS_FILE")"
+
 # Pin three fatal `exit 1` sites inside the FATAL_MSG block,
 # each preceded by a `_session_end_push || true` so commits the
 # agent landed locally before the fatal error get pushed instead

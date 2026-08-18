@@ -1,0 +1,22 @@
+{
+  "prompt": "unused",
+  "agents": [
+    {
+      "count": 1,
+      "model": "claude-opus-4-6",
+      "driver": "claude-code",
+      "effort": "high"
+    },
+    {
+      "count": 1,
+      "model": "qwen3.8-max",
+      "driver": "qwen-cli",
+      "effort": "high"
+    },
+    {
+      "count": 1,
+      "model": "qwen3.8-max",
+      "driver": "qwen-cli"
+    }
+  ]
+}

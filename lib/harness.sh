@@ -50,7 +50,7 @@ if [ ! -f "$DRIVER_FILE" ]; then
     echo "ERROR: driver not found: ${DRIVER_FILE}" >&2
     exit 1
 fi
-# shellcheck source=drivers/claude-code.sh
+# shellcheck disable=SC1090,SC1091
 source "$DRIVER_FILE"
 
 # Validate the driver implements all required interface functions.
@@ -92,6 +92,9 @@ hlog_pipe() {
             "$GREEN" "$(date +%H:%M:%S)" "$AGENT_ID" "$line" "$RST"
     done
 }
+
+# shellcheck disable=SC1091
+source /upstream-clone.sh
 
 # Ship unpushed local commits via a scratch worktree.
 #
@@ -493,7 +496,7 @@ GIT_USER_NAME="${GIT_USER_NAME:-swarm-agent}"
 GIT_USER_EMAIL="${GIT_USER_EMAIL:-agent@swarm.local}"
 git config --global user.name "$GIT_USER_NAME"
 git config --global user.email "$GIT_USER_EMAIL"
-# shellcheck source=signing.sh
+# shellcheck disable=SC1091
 source /signing.sh
 configure_git_signing
 
@@ -517,8 +520,7 @@ agent_activity_jq > "$SWARM_JQ_FILTER_FILE"
 export SWARM_JQ_FILTER_FILE
 
 if [ ! -d "/workspace/.git" ]; then
-    hlog "cloning upstream"
-    git clone -q /upstream /workspace
+    swarm_clone_upstream /upstream /workspace hlog hlog_err
     cd /workspace
 
     # Init only submodules whose mirrors were mounted into the
@@ -825,7 +827,13 @@ while true; do
         fi
     fi
 
-    _session_end_push || true
+    # Do not count an unshippable session as idle/success. The stopped
+    # container is the last durable copy of its local commits, so fail loudly
+    # and leave it available for harvest or manual recovery.
+    if ! _session_end_push; then
+        hlog_err "session-end push failed; exiting with unshipped commits preserved"
+        exit 1
+    fi
 
     if [ "$BEFORE" = "$AFTER" ]; then
         IDLE_COUNT=$((IDLE_COUNT + 1))

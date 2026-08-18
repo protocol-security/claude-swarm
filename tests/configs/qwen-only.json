@@ -1,0 +1,16 @@
+{
+  "prompt": "unused",
+  "driver": "qwen-cli",
+  "agents": [
+    {
+      "count": 1,
+      "model": "qwen3.8-max",
+      "effort": "high"
+    },
+    {
+      "count": 1,
+      "model": "qwen3.8-max",
+      "effort": "low"
+    }
+  ]
+}

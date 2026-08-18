@@ -79,8 +79,8 @@ check_contains() {
 }
 
 # Build the test image (cached after first run).  SWARM_AGENTS=fake
-# skips the claude-code / codex / gemini CLI install layers since
-# the synthetic driver below replaces every real agent.
+# skips the claude-code / codex / gemini / kimi CLI install layers
+# since the synthetic driver below replaces every real agent.
 echo "--- Building ${IMAGE_TAG} (fake driver only) ---"
 docker build --quiet --tag "$IMAGE_TAG" \
     --build-arg SWARM_AGENTS=fake "$REPO_ROOT" >/dev/null
