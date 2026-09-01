@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- **Kimi Code CLI driver.** New `kimi-cli` driver
+  (`lib/drivers/kimi-cli.sh`) implements the full interface for
+  Moonshot AI's Kimi Code CLI: headless mode with
+  `kimi -p --output-format stream-json`, activity parsing from
+  stream-json tool calls, fatal/retriable error detection, and
+  thinking effort support via `KIMI_MODEL_THINKING_EFFORT`.
+  stream-json carries no usage summary, so cost comes from the
+  swarmfile `pricing` map.
+- **Kimi auth modes.** Kimi agents authenticate via
+  `"auth": "apikey"` (host `KIMI_API_KEY` forwarded as
+  `KIMI_MODEL_API_KEY`, which makes the CLI synthesize an in-memory
+  provider) or `"auth": "oauth"` (read-only mount of the host
+  `~/.kimi-code` data dir after `kimi login`; each container copies
+  it to a writable location on startup). Auto-detection when both
+  are present. A host `KIMI_MODEL_API_KEY` is accepted directly as
+  the apikey source.
+- **Build: `kimi_cli_version` swarmfile field.** Pins the Kimi
+  Code CLI version installed in the agent image, mirroring
+  `codex_cli_version`.
+
 ## 0.22.0 — 2026-06-08
 
 - **Build: base the agent image on Debian trixie.** Replaces

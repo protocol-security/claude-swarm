@@ -52,6 +52,17 @@ RUN if echo ",$SWARM_AGENTS," | grep -q ",codex-cli,"; then \
         && mkdir -p /home/agent/.codex \
         && chown agent:agent /home/agent/.codex; \
     fi
+
+# --- Kimi Code CLI ---
+ARG KIMI_CLI_VERSION=
+# Installs to /usr/local/bin so the agent user finds kimi on PATH
+# without the script editing anyone's shell rc.
+RUN if echo ",$SWARM_AGENTS," | grep -q ",kimi-cli,"; then \
+        curl -fsSL https://code.kimi.com/kimi-code/install.sh -o /tmp/kimi-install.sh \
+        && KIMI_INSTALL_DIR=/usr/local KIMI_NO_MODIFY_PATH=1 \
+           KIMI_VERSION="$KIMI_CLI_VERSION" bash /tmp/kimi-install.sh \
+        && rm /tmp/kimi-install.sh; \
+    fi
 USER agent
 
 # Trust mounted bare repos and allow file:// transport for submodules.
@@ -60,6 +71,7 @@ RUN git config --global --add safe.directory '*' \
 
 COPY --chmod=755 lib/harness.sh /harness.sh
 COPY --chmod=755 lib/interactive.sh /interactive.sh
+COPY --chmod=644 lib/upstream-clone.sh /upstream-clone.sh
 COPY --chmod=755 lib/signing.sh /signing.sh
 COPY --chmod=755 lib/activity-filter.sh /activity-filter.sh
 COPY --chmod=644 lib/agent-system-prompt.md /agent-system-prompt.md

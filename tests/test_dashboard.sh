@@ -60,6 +60,10 @@ assert_eq "bare string medium"   "gpt-4o (m)"             "$(format_model gpt-4o
 assert_eq "claude opus max"      "claude-opus-4-6 (M)"    "$(format_model claude-opus-4-6 max)"
 assert_eq "codex xhigh"          "gpt-5.4 (x)"            "$(format_model gpt-5.4 xhigh)"
 assert_eq "codex none"           "gpt-5.4 (n)"            "$(format_model gpt-5.4 none)"
+assert_eq "kimi no effort"       "kimi-code/kimi-for-coding" \
+    "$(format_model kimi-code/kimi-for-coding "")"
+assert_eq "kimi with effort"     "kimi-code/kimi-for-coding (h)" \
+    "$(format_model kimi-code/kimi-for-coding high)"
 assert_eq "no effort"            "claude-opus-4-6"         "$(format_model claude-opus-4-6 "")"
 assert_eq "unknown no effort"    "unknown"                 "$(format_model unknown "")"
 assert_eq "empty default"        "unknown"                 "$(format_model)"
@@ -94,6 +98,7 @@ short_driver() {
         claude-code) printf 'claude' ;;
         gemini-cli)  printf 'gemini' ;;
         codex-cli)   printf 'codex'  ;;
+        kimi-cli)    printf 'kimi'   ;;
         *)           printf '%s' "${1:-}" ;;
     esac
 }
@@ -260,6 +265,7 @@ echo "=== 4. short_driver ==="
 assert_eq "claude-code → claude" "claude" "$(short_driver claude-code)"
 assert_eq "gemini-cli → gemini"  "gemini" "$(short_driver gemini-cli)"
 assert_eq "codex-cli → codex"    "codex"  "$(short_driver codex-cli)"
+assert_eq "kimi-cli → kimi"      "kimi"   "$(short_driver kimi-cli)"
 assert_eq "fake passthrough"     "fake"   "$(short_driver fake)"
 assert_eq "unknown passthrough"  "foo"    "$(short_driver foo)"
 assert_eq "empty → empty"       ""        "$(short_driver "")"
@@ -542,6 +548,10 @@ assert_eq "gemini flash no effort" "gemini-3-flash-preview" \
     "$(format_model "gemini-3-flash-preview" "")"
 assert_eq "gemini with effort" "gemini-2.5-pro (h)" \
     "$(format_model "gemini-2.5-pro" "high")"
+assert_eq "kimi full name" "kimi-code/kimi-for-coding" \
+    "$(format_model "kimi-code/kimi-for-coding" "")"
+assert_eq "kimi with effort" "kimi-code/kimi-for-coding (l)" \
+    "$(format_model "kimi-code/kimi-for-coding" "low")"
 
 # ============================================================
 echo ""
@@ -626,6 +636,31 @@ cat > "$TMPDIR/pp_driver_split.json" <<'EOF'
 EOF
 assert_eq "post-process driver split → 2 drivers" "2" \
     "$(detect_multi_drivers "$TMPDIR/pp_driver_split.json")"
+
+cat > "$TMPDIR/mixed_kimi.json" <<'EOF'
+{
+  "prompt": "p.md",
+  "driver": "kimi-cli",
+  "agents": [
+    { "count": 1, "model": "kimi-code/kimi-for-coding" },
+    { "count": 1, "model": "claude-opus-4-6", "driver": "claude-code" }
+  ]
+}
+EOF
+assert_eq "kimi + claude override → 2 drivers" "2" \
+    "$(detect_multi_drivers "$TMPDIR/mixed_kimi.json")"
+
+cat > "$TMPDIR/all_kimi.json" <<'EOF'
+{
+  "prompt": "p.md",
+  "driver": "kimi-cli",
+  "agents": [
+    { "count": 1, "model": "kimi-code/kimi-for-coding" },
+    { "count": 1, "model": "kimi-code/kimi-for-coding" }
+  ]
+}
+EOF
+assert_eq "all kimi → 1 driver" "1" "$(detect_multi_drivers "$TMPDIR/all_kimi.json")"
 
 # ============================================================
 echo ""

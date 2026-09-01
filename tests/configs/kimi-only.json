@@ -1,0 +1,16 @@
+{
+  "prompt": "unused",
+  "driver": "kimi-cli",
+  "agents": [
+    {
+      "count": 1,
+      "model": "kimi-code/kimi-for-coding",
+      "effort": "high"
+    },
+    {
+      "count": 1,
+      "model": "kimi-code/kimi-for-coding",
+      "effort": "low"
+    }
+  ]
+}

@@ -1230,6 +1230,146 @@ assert_eq "git name still works" "bot" \
 
 # ============================================================
 echo ""
+echo "=== 35. Kimi-only config ==="
+
+CFG="$TESTS_DIR/configs/kimi-only.json"
+
+assert_eq "kimi-only count" "2" "$(parse_num_agents "$CFG")"
+assert_eq "kimi-only driver" "kimi-cli" "$(jq -r '.driver' "$CFG")"
+assert_eq "kimi-only model[0]" "kimi-code/kimi-for-coding" \
+    "$(jq -r '.agents[0].model' "$CFG")"
+assert_eq "kimi-only effort[0]" "high" "$(jq -r '.agents[0].effort' "$CFG")"
+assert_eq "kimi-only effort[1]" "low"  "$(jq -r '.agents[1].effort' "$CFG")"
+
+# Agents inherit top-level driver.
+KIMI_AGENTS=$(jq -r '.driver as $dd | .agents[] | range(.count // 0) as $i |
+    (.driver // $dd // "claude-code")' "$CFG")
+assert_eq "kimi-only agent inherits driver" "kimi-cli" \
+    "$(echo "$KIMI_AGENTS" | sed -n '1p')"
+
+# ============================================================
+echo ""
+echo "=== 36. Kimi OAuth auth config ==="
+
+CFG="$TESTS_DIR/configs/kimi-oauth.json"
+
+assert_eq "kimi-oauth count"   "2"        "$(parse_num_agents "$CFG")"
+assert_eq "kimi-oauth driver"  "kimi-cli" "$(jq -r '.driver' "$CFG")"
+assert_eq "kimi-oauth model[0]" "kimi-code/kimi-for-coding" \
+    "$(jq -r '.agents[0].model' "$CFG")"
+assert_eq "kimi-oauth auth[0]" "oauth" "$(jq -r '.agents[0].auth' "$CFG")"
+assert_eq "kimi-oauth auth[1]" "oauth" "$(jq -r '.agents[1].auth' "$CFG")"
+
+# All agents inherit oauth auth.
+_all_auths=$(jq -r \
+    '.agents[] | range(.count // 0) as $i | (.auth // "auto")' \
+    "$CFG")
+_oauth_count=$(echo "$_all_auths" | grep -c "oauth" || true)
+assert_eq "kimi-oauth all auth=oauth" "2" "$_oauth_count"
+
+# ============================================================
+echo ""
+echo "=== 37. Kimi data dir driver-level resolution ==="
+
+source "$TESTS_DIR/../lib/drivers/kimi-cli.sh"
+_fake_kimi_home="$TMPDIR/fake-kimi-home"
+mkdir -p "$_fake_kimi_home/oauth"
+
+# auth=apikey: env provider key, no mount.
+AUTH_OUT=$(KIMI_API_KEY="sk-kimi-key" KIMI_CODE_HOME="$_fake_kimi_home" \
+    agent_docker_auth "" "" "apikey" "")
+assert_contains "kimi resolve apikey has key" \
+    "KIMI_MODEL_API_KEY=sk-kimi-key" "$AUTH_OUT"
+assert_contains "kimi resolve apikey label" "SWARM_AUTH_MODE=key" "$AUTH_OUT"
+_mount_count=$(echo "$AUTH_OUT" | grep -c -- "--mount" || true)
+assert_eq "kimi resolve apikey no mount" "0" "$_mount_count"
+
+# auth=oauth: mounts the data dir, no key.
+AUTH_OUT=$(KIMI_API_KEY="" KIMI_CODE_HOME="$_fake_kimi_home" \
+    agent_docker_auth "" "" "oauth" "")
+assert_contains "kimi resolve oauth mounts" "$_fake_kimi_home" "$AUTH_OUT"
+assert_contains "kimi resolve oauth readonly" "readonly" "$AUTH_OUT"
+assert_contains "kimi resolve oauth label" "SWARM_AUTH_MODE=oauth" "$AUTH_OUT"
+_key_count=$(echo "$AUTH_OUT" | grep -c "KIMI_MODEL_API_KEY" || true)
+assert_eq "kimi resolve oauth no key" "0" "$_key_count"
+
+# auth omitted, both available: auto-detect.
+AUTH_OUT=$(KIMI_API_KEY="sk-auto-key" KIMI_CODE_HOME="$_fake_kimi_home" \
+    agent_docker_auth "" "" "" "")
+assert_contains "kimi resolve auto has key" \
+    "KIMI_MODEL_API_KEY=sk-auto-key" "$AUTH_OUT"
+assert_contains "kimi resolve auto mounts" "$_fake_kimi_home" "$AUTH_OUT"
+assert_contains "kimi resolve auto label" "SWARM_AUTH_MODE=auto" "$AUTH_OUT"
+
+# auth omitted, only data dir: oauth label.
+AUTH_OUT=$(KIMI_API_KEY="" KIMI_CODE_HOME="$_fake_kimi_home" \
+    agent_docker_auth "" "" "" "")
+assert_contains "kimi resolve oauth-only mount" "$_fake_kimi_home" "$AUTH_OUT"
+assert_contains "kimi resolve oauth-only label" "SWARM_AUTH_MODE=oauth" "$AUTH_OUT"
+
+# KIMI_CODE_HOME pointing at a missing dir: no mount.
+AUTH_OUT=$(KIMI_API_KEY="" KIMI_CODE_HOME="/tmp/nonexistent-kimi-home" \
+    agent_docker_auth "" "" "oauth" "" 2>/dev/null)
+_mount_count=$(echo "$AUTH_OUT" | grep -c -- "--mount" || true)
+assert_eq "kimi resolve missing dir no mount" "0" "$_mount_count"
+
+# ============================================================
+echo ""
+echo "=== 38. Kimi-mixed config ==="
+
+CFG="$TESTS_DIR/configs/kimi-mixed.json"
+
+MIXED_COUNT=$(parse_num_agents "$CFG")
+assert_eq "kimi-mixed count" "3" "$MIXED_COUNT"
+
+MIXED_AGENTS=$(jq -r '.driver as $dd | .agents[] | range(.count // 0) as $i |
+    [(.model), (.driver // $dd // "claude-code")] | join("|")' "$CFG")
+KA1=$(echo "$MIXED_AGENTS" | sed -n '1p')
+KA2=$(echo "$MIXED_AGENTS" | sed -n '2p')
+KA3=$(echo "$MIXED_AGENTS" | sed -n '3p')
+assert_eq "kimi-mixed agent1 driver" "claude-code" "$(echo "$KA1" | cut -d'|' -f2)"
+assert_eq "kimi-mixed agent1 model"  "claude-opus-4-6" "$(echo "$KA1" | cut -d'|' -f1)"
+assert_eq "kimi-mixed agent2 driver" "kimi-cli" "$(echo "$KA2" | cut -d'|' -f2)"
+assert_eq "kimi-mixed agent2 model"  "kimi-code/kimi-for-coding" \
+    "$(echo "$KA2" | cut -d'|' -f1)"
+assert_eq "kimi-mixed agent2 effort" "high" "$(jq -r '.agents[1].effort' "$CFG")"
+assert_eq "kimi-mixed agent3 driver" "kimi-cli" "$(echo "$KA3" | cut -d'|' -f2)"
+assert_eq "kimi-mixed agent3 model"  "kimi-code/kimi-for-coding" \
+    "$(echo "$KA3" | cut -d'|' -f1)"
+assert_eq "kimi-mixed agent3 effort" "null" "$(jq -r '.agents[2].effort // null' "$CFG")"
+
+# ============================================================
+echo ""
+echo "=== 39. Kimi auth-mixed config ==="
+
+CFG="$TESTS_DIR/configs/kimi-auth-mixed.json"
+
+assert_eq "kimi-auth-mixed count" "3" "$(parse_num_agents "$CFG")"
+assert_eq "kimi-auth-mixed groups" "3" "$(jq '.agents | length' "$CFG")"
+
+# Group 1: explicit oauth auth.
+assert_eq "kimi-auth-mixed[0] auth"  "oauth" "$(jq -r '.agents[0].auth' "$CFG")"
+assert_eq "kimi-auth-mixed[0] model" "kimi-code/kimi-for-coding" \
+    "$(jq -r '.agents[0].model' "$CFG")"
+
+# Group 2: explicit apikey auth.
+assert_eq "kimi-auth-mixed[1] auth"  "apikey" "$(jq -r '.agents[1].auth' "$CFG")"
+assert_eq "kimi-auth-mixed[1] model" "kimi-code/kimi-for-coding" \
+    "$(jq -r '.agents[1].model' "$CFG")"
+
+# Group 3: no auth field (auto-detect at runtime).
+assert_eq "kimi-auth-mixed[2] auth"  "null" "$(jq -r '.agents[2].auth // "null"' "$CFG")"
+assert_eq "kimi-auth-mixed[2] model" "kimi-code/kimi-for-coding" \
+    "$(jq -r '.agents[2].model' "$CFG")"
+
+# All inherit kimi-cli driver.
+_all_drivers=$(jq -r '.driver as $dd | .agents[] | range(.count // 0) as $i |
+    (.driver // $dd // "claude-code")' "$CFG")
+_kimi_count=$(echo "$_all_drivers" | grep -c "kimi-cli" || true)
+assert_eq "kimi-auth-mixed all kimi-cli" "3" "$_kimi_count"
+
+# ============================================================
+echo ""
 echo "==============================="
 echo "  ${PASS} passed, ${FAIL} failed"
 if [ "$FAIL" -gt 0 ]; then

@@ -1,0 +1,22 @@
+{
+  "prompt": "unused",
+  "agents": [
+    {
+      "count": 1,
+      "model": "claude-opus-4-6",
+      "driver": "claude-code",
+      "auth": "oauth"
+    },
+    {
+      "count": 1,
+      "model": "kimi-code/kimi-for-coding",
+      "driver": "kimi-cli",
+      "effort": "high"
+    },
+    {
+      "count": 1,
+      "model": "kimi-code/kimi-for-coding",
+      "driver": "kimi-cli"
+    }
+  ]
+}

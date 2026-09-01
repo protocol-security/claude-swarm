@@ -42,6 +42,8 @@ Credentials stay as env vars (not in shell history).
 | `OPENAI_API_KEY` | | OpenAI API key (for Codex CLI driver). |
 | `CODEX_AUTH_JSON` | `~/.codex/auth.json` | Path to Codex auth file (ChatGPT subscription). |
 | `GEMINI_API_KEY` | | Google API key (for Gemini CLI driver). |
+| `KIMI_API_KEY` | | Moonshot API key (for Kimi Code CLI driver). |
+| `KIMI_CODE_HOME` | `~/.kimi-code` | Path to Kimi data dir (OAuth login state). |
 | `SWARM_CONFIG` | | Path to swarmfile (or place `swarm.json` in repo root). |
 | `SWARM_TITLE` | | Dashboard title override. |
 | `SWARM_SKIP_DEP_CHECK` | | Set to `1` to silence dependency version warnings. |
@@ -77,13 +79,16 @@ Per-group fields in `swarm.json` `agents` array:
 
 - Claude Code: `low`, `medium`, `high`, `max` (Opus only).
 - Codex CLI: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`.
+- Kimi Code CLI: `low`, `medium`, `high`, `xhigh`, `max`, but the set a
+  model actually accepts is model-dependent — `kimi-for-coding` rejects
+  `medium` and `xhigh` with a 400; use `low`, `high`, or `max` there.
 - Gemini CLI: ignored.
 
 Top-level fields: `prompt`, `setup`, `max_idle` (default: `3`),
 `max_retry_wait`, `driver`, `inject_git_rules`,
 `git_user` (`name`, `email`, `signing_key`),
-`claude_code_version`, `codex_cli_version`, `title`, `tag`,
-`pricing`, `docker_args`, `post_process`.
+`claude_code_version`, `codex_cli_version`, `kimi_cli_version`,
+`title`, `tag`, `pricing`, `docker_args`, `post_process`.
 
 ### Interactive profiles
 
@@ -603,6 +608,35 @@ then set `"auth": "chatgpt"` in your swarm config:
 The auth file is bind-mounted read-only into containers.
 Override the path with `CODEX_AUTH_JSON=/path/to/auth.json`.
 
+### Kimi Code CLI
+
+| `auth` value | Credential injected |
+|---|---|
+| `apikey` | `KIMI_API_KEY` via the `KIMI_MODEL_*` env provider |
+| `oauth` | Mounts `~/.kimi-code` (after `kimi login` on the host) |
+| omit | API key if set + data dir if found |
+
+The CLI does not read `KIMI_API_KEY` from the shell environment.
+The driver forwards it as `KIMI_MODEL_API_KEY` instead, which makes
+the CLI synthesize an in-memory provider for the configured model.
+With `apikey` auth the swarmfile `model` is used as the API model
+id (the part after `/` in aliases like `kimi-code/kimi-for-coding`),
+not looked up as a config alias.
+
+For OAuth auth, run `kimi login` on the host, then set
+`"auth": "oauth"` in your swarm config:
+
+```json
+{
+  "driver": "kimi-cli",
+  "agents": [{ "model": "kimi-code/kimi-for-coding", "auth": "oauth" }]
+}
+```
+
+The data dir is bind-mounted read-only; each container copies it to
+a writable location on startup.  Override the source path with
+`KIMI_CODE_HOME=/path/to/kimi-home`.
+
 ### General rules
 
 Groups with `api_key` or `auth_token` ignore the `auth`
@@ -664,6 +698,7 @@ Built-in drivers:
 | `claude-code` | `claude` | Yes |
 | `gemini-cli` | `gemini` | |
 | `codex-cli` | `codex` | |
+| `kimi-cli` | `kimi` | |
 | `fake` | (none) | Test double for unit testing |
 
 Set the driver globally in `swarm.json`:
@@ -709,6 +744,20 @@ swarmfile:
 The value is forwarded to `npm install -g @openai/codex@<ver>`
 inside the image build.  Leave the field unset (or empty) to
 keep the default "latest published release" behavior.
+
+### Pinning Kimi Code CLI version
+
+By default the Docker image installs the latest Kimi Code CLI.
+To pin a specific version, set `kimi_cli_version` in the
+swarmfile:
+
+```json
+{ "kimi_cli_version": "0.28.0" }
+```
+
+The value is passed to the official install script
+(`code.kimi.com/kimi-code/install.sh`) inside the image build.
+Leave the field unset (or empty) to install the latest release.
 
 ### Writing a new driver
 

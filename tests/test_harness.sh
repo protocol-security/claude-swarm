@@ -634,6 +634,52 @@ assert_eq "backoff capped at 1800" "1800" "$(simulate_backoff 10)"
         "$(probe_retriable 'model_not_found: gpt-unknown is not available')"
 )
 
+# --- 14c. kimi-cli agent_is_retriable classification ---
+#
+# Same two-class contract as codex: the harness only enters the
+# backoff loop on a non-empty class label, so a misclassified
+# transient failure would exit the swarm instead of retrying.
+(
+    # Subshell so sourcing the driver doesn't clobber earlier
+    # assertions' shell state.
+    source "$TESTS_DIR/../lib/drivers/kimi-cli.sh"
+
+    probe_retriable() {
+        local log="$TMPDIR/kimi-retriable-$$-${RANDOM}.log"
+        printf '%s\n' "$1" > "$log"
+        agent_is_retriable "$log" 1
+        rm -f "$log"
+    }
+
+    # Rate-limit class.
+    assert_eq "kimi retriable: 429 response" "rate_limited" \
+        "$(probe_retriable 'HTTP 429 Too Many Requests')"
+    assert_eq "kimi retriable: quota exhaustion" "rate_limited" \
+        "$(probe_retriable 'quota exceeded for the current plan')"
+    assert_eq "kimi retriable: usage limit" "rate_limited" \
+        "$(probe_retriable 'You have hit your usage limit')"
+
+    # Transient class.
+    assert_eq "kimi retriable: 502 bad gateway" "transient" \
+        "$(probe_retriable 'HTTP 502 Bad Gateway')"
+    assert_eq "kimi retriable: 503 service unavailable" "transient" \
+        "$(probe_retriable 'HTTP 503 Service Unavailable')"
+    assert_eq "kimi retriable: connection reset" "transient" \
+        "$(probe_retriable 'connection reset by peer')"
+    assert_eq "kimi retriable: request timeout" "transient" \
+        "$(probe_retriable 'request timed out after 60s')"
+    assert_eq "kimi retriable: at capacity" "transient" \
+        "$(probe_retriable 'Selected model is at capacity.')"
+    assert_eq "kimi retriable: overloaded" "transient" \
+        "$(probe_retriable 'The server is overloaded, please retry later')"
+
+    # Genuinely fatal errors must NOT be reclassified as retriable.
+    assert_eq "kimi non-retriable: auth error" "" \
+        "$(probe_retriable 'Unauthorized: invalid API key')"
+    assert_eq "kimi non-retriable: model not found" "" \
+        "$(probe_retriable 'model_not_found: kimi-unknown is not available')"
+)
+
 # ============================================================
 echo ""
 echo "=== 12. SSH signing config ==="

@@ -49,6 +49,9 @@ ilog_err() {
         "$RED" "$(date +%H:%M:%S)" "$SWARM_INTERACTIVE_PROFILE" "$*" "$RST"
 }
 
+# shellcheck disable=SC1091
+source /upstream-clone.sh
+
 write_interactive_state() {
     [ -d /workspace/.git ] || return 0
     mkdir -p /workspace/agent_logs
@@ -118,8 +121,7 @@ AGENT_CLI_NAME=$(agent_name)
 export AGENT_CLI_NAME
 
 if [ ! -d /workspace/.git ]; then
-    ilog "cloning upstream"
-    git clone -q /upstream /workspace
+    swarm_clone_upstream /upstream /workspace ilog ilog_err
     cd /workspace
     git fetch --no-recurse-submodules origin 2>&1 || true
 

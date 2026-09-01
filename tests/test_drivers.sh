@@ -59,6 +59,8 @@ assert_eq "fake driver exists" "true" \
     "$([ -f "$DRIVERS_DIR/fake.sh" ] && echo true || echo false)"
 assert_eq "codex driver exists" "true" \
     "$([ -f "$DRIVERS_DIR/codex-cli.sh" ] && echo true || echo false)"
+assert_eq "kimi driver exists" "true" \
+    "$([ -f "$DRIVERS_DIR/kimi-cli.sh" ] && echo true || echo false)"
 assert_eq "_common.sh exists" "true" \
     "$([ -f "$DRIVERS_DIR/_common.sh" ] && echo true || echo false)"
 
@@ -415,6 +417,12 @@ for fn in "${_required_fns[@]}"; do
         "$(type -t "$fn" &>/dev/null && echo true || echo false)"
 done
 
+source "$DRIVERS_DIR/kimi-cli.sh"
+for fn in "${_required_fns[@]}"; do
+    assert_eq "kimi has $fn" "true" \
+        "$(type -t "$fn" &>/dev/null && echo true || echo false)"
+done
+
 # ============================================================
 echo ""
 echo "=== 17. Gemini CLI driver — role interface ==="
@@ -545,6 +553,9 @@ assert_eq "gemini default model" "gemini-2.5-pro" "$(agent_default_model)"
 
 source "$DRIVERS_DIR/codex-cli.sh"
 assert_eq "codex default model" "gpt-5.4" "$(agent_default_model)"
+
+source "$DRIVERS_DIR/kimi-cli.sh"
+assert_eq "kimi default model" "kimi-code/kimi-for-coding" "$(agent_default_model)"
 
 # ============================================================
 echo ""
@@ -1316,7 +1327,7 @@ assert_eq "_run_reaped is defined" "function" \
 # `| stdbuf -oL tee "$logfile"` form is absent. Pin both per
 # driver. fake.sh is intentionally exempt -- it emits synthetic
 # JSONL inline and never spawns external children.
-for _drv in claude-code codex-cli gemini-cli; do
+for _drv in claude-code codex-cli gemini-cli kimi-cli; do
     assert_eq "$_drv: adopts _run_reaped" "1" \
         "$(grep -cE '^[[:space:]]*_run_reaped "\$logfile"' "$DRIVERS_DIR/$_drv.sh")"
     assert_eq "$_drv: drops bare tee pipe" "0" \
@@ -1554,6 +1565,451 @@ CLI
     # must not survive the test.
     pkill -f 'sleep 98765' 2>/dev/null || true
 fi
+
+# ============================================================
+echo ""
+echo "=== 41. Kimi driver — role interface ==="
+
+source "$DRIVERS_DIR/kimi-cli.sh"
+
+assert_eq "kimi name"    "Kimi Code CLI"             "$(agent_name)"
+assert_eq "kimi cmd"     "kimi"                      "$(agent_cmd)"
+assert_eq "kimi default" "kimi-code/kimi-for-coding" "$(agent_default_model)"
+
+KIMI_JQ=$(agent_activity_jq)
+assert_not_empty "kimi jq filter" "$KIMI_JQ"
+assert_contains "kimi jq has tool_calls" "tool_calls" "$KIMI_JQ"
+assert_contains "kimi jq has Bash" "Bash" "$KIMI_JQ"
+
+KIMI_INSTALL=$(agent_install_cmd)
+assert_contains "kimi install uses official script" \
+    "https://code.kimi.com/kimi-code/install.sh" "$KIMI_INSTALL"
+assert_contains "kimi install targets /usr/local" \
+    "KIMI_INSTALL_DIR=/usr/local" "$KIMI_INSTALL"
+assert_contains "kimi install leaves shell rc alone" \
+    "KIMI_NO_MODIFY_PATH=1" "$KIMI_INSTALL"
+assert_contains "kimi install supports version" "KIMI_CLI_VERSION" "$KIMI_INSTALL"
+
+# The build-arg is threaded into KIMI_VERSION verbatim; the script
+# treats an empty value as "latest" (its `[ -n "$KIMI_VERSION" ]`
+# guard), so no conditional is needed on the Dockerfile side.
+assert_contains "kimi install passes build-arg through" \
+    'KIMI_VERSION="$KIMI_CLI_VERSION"' "$KIMI_INSTALL"
+
+# Headless runs must not pass --yolo: kimi rejects --prompt combined
+# with --yolo/--auto/--plan at startup.
+assert_eq "kimi agent_run drops --yolo" "0" \
+    "$(awk '/^agent_run\(\) \{/,/^\}/' "$DRIVERS_DIR/kimi-cli.sh" \
+        | grep -cE '^[[:space:]]+--yolo([[:space:]]|$)' || true)"
+
+# The headless command shape depends on auth: with KIMI_MODEL_API_KEY
+# the env provider's synthesized model is already the CLI default, so
+# passing -m <swarmfile alias> would fail to resolve; without a key
+# the alias has to be passed explicitly.
+(
+    unset KIMI_MODEL_API_KEY KIMI_MODEL_NAME
+    _run_reaped() { shift; printf '%s\n' "$*"; }
+    KIMI_MODEL_API_KEY="sk-test" agent_run \
+        "kimi-code/kimi-for-coding" "p" "$TMPDIR/kimi-shape.log"
+    printf 'name=%s\n' "${KIMI_MODEL_NAME:-}"
+) > "$TMPDIR/kimi-shape-key.txt"
+assert_eq "kimi apikey: -m not passed" "0" \
+    "$(grep -c -- '-m kimi-code' "$TMPDIR/kimi-shape-key.txt" || true)"
+assert_eq "kimi apikey: model name prefix stripped" "name=kimi-for-coding" \
+    "$(grep '^name=' "$TMPDIR/kimi-shape-key.txt")"
+
+(
+    unset KIMI_MODEL_API_KEY KIMI_MODEL_NAME
+    _run_reaped() { shift; printf '%s\n' "$*"; }
+    agent_run "kimi-code/kimi-for-coding" "p" "$TMPDIR/kimi-shape.log"
+    printf 'name=%s\n' "${KIMI_MODEL_NAME:-unset}"
+) > "$TMPDIR/kimi-shape-oauth.txt"
+assert_eq "kimi oauth: -m alias passed" "1" \
+    "$(grep -c -- '-m kimi-code/kimi-for-coding' \
+        "$TMPDIR/kimi-shape-oauth.txt" || true)"
+assert_eq "kimi oauth: model name untouched" "name=unset" \
+    "$(grep '^name=' "$TMPDIR/kimi-shape-oauth.txt")"
+
+# ============================================================
+echo ""
+echo "=== 42. Kimi driver — agent_settings ==="
+
+KWORK="$TMPDIR/kimi-workspace"
+mkdir -p "$KWORK/.git/info"
+
+# 42a. Staged oauth mount is copied to a writable data dir.
+KHOME1="$TMPDIR/kimi-home1"
+mkdir -p "$KHOME1/.kimi-code-host/oauth"
+echo "token" > "$KHOME1/.kimi-code-host/oauth/token"
+HOME="$KHOME1" agent_settings "$KWORK"
+assert_eq "kimi staged dir copied" "token" \
+    "$(cat "$KHOME1/.kimi-code/oauth/token")"
+
+# 42b. An existing data dir is never overwritten by the staged copy.
+KHOME2="$TMPDIR/kimi-home2"
+mkdir -p "$KHOME2/.kimi-code/oauth" "$KHOME2/.kimi-code-host/oauth"
+echo "local" > "$KHOME2/.kimi-code/oauth/token"
+echo "host"  > "$KHOME2/.kimi-code-host/oauth/token"
+HOME="$KHOME2" agent_settings "$KWORK"
+assert_eq "kimi existing data dir wins" "local" \
+    "$(cat "$KHOME2/.kimi-code/oauth/token")"
+
+# 42c. No staged mount: no data dir created (env-provider auth
+# needs no files on disk).
+KHOME3="$TMPDIR/kimi-home3"
+mkdir -p "$KHOME3"
+HOME="$KHOME3" agent_settings "$KWORK"
+assert_eq "kimi no data dir without staged mount" "false" \
+    "$([ -e "$KHOME3/.kimi-code" ] && echo true || echo false)"
+
+# 42d. AGENTS.md bridge: .claude/CLAUDE.md copied when no AGENTS.md.
+KWORK_B="$TMPDIR/kimi-bridge"
+mkdir -p "$KWORK_B/.claude" "$KWORK_B/.git/info"
+echo "# Project rules" > "$KWORK_B/.claude/CLAUDE.md"
+HOME="$KHOME3" agent_settings "$KWORK_B"
+assert_eq "kimi AGENTS.md bridged" "# Project rules" \
+    "$(cat "$KWORK_B/AGENTS.md")"
+assert_contains "kimi AGENTS.md in git exclude" "AGENTS.md" \
+    "$(cat "$KWORK_B/.git/info/exclude")"
+
+# 42e. Existing AGENTS.md not overwritten.
+KWORK_C="$TMPDIR/kimi-bridge-existing"
+mkdir -p "$KWORK_C/.claude" "$KWORK_C/.git/info"
+echo "# Kimi rules" > "$KWORK_C/AGENTS.md"
+echo "# Claude rules" > "$KWORK_C/.claude/CLAUDE.md"
+HOME="$KHOME3" agent_settings "$KWORK_C"
+assert_eq "kimi existing AGENTS.md preserved" "# Kimi rules" \
+    "$(cat "$KWORK_C/AGENTS.md")"
+
+# 42f. Skills bridge: .claude/skills/ symlinked to .agents/skills/.
+KWORK_D="$TMPDIR/kimi-skills"
+mkdir -p "$KWORK_D/.claude/skills/triage" "$KWORK_D/.git/info"
+echo "---" > "$KWORK_D/.claude/skills/triage/SKILL.md"
+HOME="$KHOME3" agent_settings "$KWORK_D"
+assert_eq "kimi skills symlink created" "true" \
+    "$([ -L "$KWORK_D/.agents/skills" ] && echo true || echo false)"
+assert_eq "kimi skill resolves" "---" \
+    "$(cat "$KWORK_D/.agents/skills/triage/SKILL.md")"
+assert_contains "kimi .agents/ in git exclude" ".agents/" \
+    "$(cat "$KWORK_D/.git/info/exclude")"
+
+# 42g. AGENTS.md bridge: CLAUDE.md at root used as fallback.
+KWORK_E="$TMPDIR/kimi-bridge-root"
+mkdir -p "$KWORK_E/.git/info"
+echo "# Root rules" > "$KWORK_E/CLAUDE.md"
+HOME="$KHOME3" agent_settings "$KWORK_E"
+assert_eq "kimi AGENTS.md from root CLAUDE.md" "# Root rules" \
+    "$(cat "$KWORK_E/AGENTS.md")"
+
+# 42h. Priority: .claude/CLAUDE.md wins over root CLAUDE.md.
+KWORK_F="$TMPDIR/kimi-priority"
+mkdir -p "$KWORK_F/.claude" "$KWORK_F/.git/info"
+echo "# inner" > "$KWORK_F/.claude/CLAUDE.md"
+echo "# outer" > "$KWORK_F/CLAUDE.md"
+HOME="$KHOME3" agent_settings "$KWORK_F"
+assert_eq "kimi .claude/CLAUDE.md wins over root" "# inner" \
+    "$(cat "$KWORK_F/AGENTS.md")"
+
+# 42i. AGENTS.md bridge: no CLAUDE.md anywhere, nothing created.
+KWORK_G="$TMPDIR/kimi-bridge-none"
+mkdir -p "$KWORK_G/.git/info"
+HOME="$KHOME3" agent_settings "$KWORK_G"
+assert_eq "kimi no AGENTS.md without CLAUDE.md" "false" \
+    "$([ -f "$KWORK_G/AGENTS.md" ] && echo true || echo false)"
+
+# 42j. Skills bridge: existing .agents/skills/ not overwritten.
+KWORK_H="$TMPDIR/kimi-skills-existing"
+mkdir -p "$KWORK_H/.agents/skills/custom" "$KWORK_H/.claude/skills/other" \
+    "$KWORK_H/.git/info"
+echo "custom" > "$KWORK_H/.agents/skills/custom/SKILL.md"
+HOME="$KHOME3" agent_settings "$KWORK_H"
+assert_eq "kimi existing .agents/skills preserved" "custom" \
+    "$(cat "$KWORK_H/.agents/skills/custom/SKILL.md")"
+assert_eq "kimi .agents/skills not a symlink" "false" \
+    "$([ -L "$KWORK_H/.agents/skills" ] && echo true || echo false)"
+
+# 42k. Full context: .claude/CLAUDE.md and .claude/skills/ both
+#      present, neither target exists → both bridged.
+KWORK_I="$TMPDIR/kimi-full-both"
+mkdir -p "$KWORK_I/.claude/skills/triage" "$KWORK_I/.git/info"
+echo "# full rules" > "$KWORK_I/.claude/CLAUDE.md"
+echo "---" > "$KWORK_I/.claude/skills/triage/SKILL.md"
+HOME="$KHOME3" agent_settings "$KWORK_I"
+assert_eq "kimi full: AGENTS.md bridged" "# full rules" \
+    "$(cat "$KWORK_I/AGENTS.md")"
+assert_eq "kimi full: skills symlinked" "true" \
+    "$([ -L "$KWORK_I/.agents/skills" ] && echo true || echo false)"
+
+# 42l. AGENTS.md exists + .claude/skills/ present → only skills
+#      bridged, AGENTS.md untouched.
+KWORK_J="$TMPDIR/kimi-agents-exists-skills"
+mkdir -p "$KWORK_J/.claude/skills/build-poc" "$KWORK_J/.git/info"
+echo "# own agents" > "$KWORK_J/AGENTS.md"
+echo "# claude" > "$KWORK_J/.claude/CLAUDE.md"
+echo "---" > "$KWORK_J/.claude/skills/build-poc/SKILL.md"
+HOME="$KHOME3" agent_settings "$KWORK_J"
+assert_eq "kimi AGENTS.md kept, not overwritten" "# own agents" \
+    "$(cat "$KWORK_J/AGENTS.md")"
+assert_eq "kimi skills still bridged" "true" \
+    "$([ -L "$KWORK_J/.agents/skills" ] && echo true || echo false)"
+
+# ============================================================
+echo ""
+echo "=== 43. Kimi driver — agent_extract_stats ==="
+
+cat > "$TMPDIR/kimi-session.jsonl" <<'EOF'
+{"role":"meta","type":"system.version","version":"0.28.0"}
+{"role":"assistant","tool_calls":[{"type":"function","id":"t1","function":{"name":"Bash","arguments":"{\"command\":\"ls\"}"}}]}
+{"role":"tool","tool_call_id":"t1","content":"file.ts"}
+{"role":"assistant","content":"Done."}
+EOF
+
+KSTATS=$(agent_extract_stats "$TMPDIR/kimi-session.jsonl")
+IFS=$'\t' read -r k_cost k_in k_out k_cache_rd k_cache_cr k_dur k_api_ms k_turns <<< "$KSTATS"
+
+assert_eq "kimi cost is 0 (no usage in stream-json)" "0" "$k_cost"
+assert_eq "kimi tok_in"  "0" "$k_in"
+assert_eq "kimi tok_out" "0" "$k_out"
+assert_eq "kimi turns = assistant messages" "2" "$k_turns"
+
+# Empty log: all zeroes.
+: > "$TMPDIR/kimi-empty.jsonl"
+KSTATS_EMPTY=$(agent_extract_stats "$TMPDIR/kimi-empty.jsonl")
+IFS=$'\t' read -r k_cost k_in k_out k_cache_rd k_cache_cr k_dur k_api_ms k_turns <<< "$KSTATS_EMPTY"
+assert_eq "kimi empty cost"  "0" "$k_cost"
+assert_eq "kimi empty turns" "0" "$k_turns"
+
+# ============================================================
+echo ""
+echo "=== 44. Kimi driver — agent_detect_fatal ==="
+
+# Fatal: stderr error with no assistant output.
+: > "$TMPDIR/kimi-stderr.jsonl"
+cat > "$TMPDIR/kimi-stderr.jsonl.err" <<'EOF'
+Error: Unauthorized - invalid API key
+EOF
+KFATAL=$(agent_detect_fatal "$TMPDIR/kimi-stderr.jsonl" 1)
+assert_not_empty "kimi stderr error detected" "$KFATAL"
+assert_contains "kimi fatal mentions unauthorized" "Unauthorized" "$KFATAL"
+
+# Not fatal: assistant output present despite stderr noise.
+cat > "$TMPDIR/kimi-ok.jsonl" <<'EOF'
+{"role":"assistant","content":"Done."}
+EOF
+cat > "$TMPDIR/kimi-ok.jsonl.err" <<'EOF'
+Warning: transient error retried successfully
+EOF
+KOK=$(agent_detect_fatal "$TMPDIR/kimi-ok.jsonl" 0)
+assert_eq "kimi ok not flagged" "" "$KOK"
+
+# Clean log: no err file at all.
+cat > "$TMPDIR/kimi-clean.jsonl" <<'EOF'
+{"role":"assistant","content":"Done."}
+EOF
+KCLEAN=$(agent_detect_fatal "$TMPDIR/kimi-clean.jsonl" 0)
+assert_eq "kimi clean not flagged" "" "$KCLEAN"
+
+# ============================================================
+echo ""
+echo "=== 45. Kimi driver — agent_is_retriable ==="
+
+# Rate limit signalled by the CLI's own retry meta line.
+cat > "$TMPDIR/kimi-429.jsonl" <<'EOF'
+{"role":"meta","type":"turn.step.retrying","failed_attempt":1,"next_attempt":2,"max_attempts":5,"delay_ms":2000,"error_name":"APIError","error_message":"429 Too many requests","status_code":429}
+EOF
+RETRY_OUT=$(agent_is_retriable "$TMPDIR/kimi-429.jsonl" 1)
+assert_not_empty "kimi 429 is retriable" "$RETRY_OUT"
+
+# Moonshot's plan exhaustion is worded as quota, not rate limiting.
+cat > "$TMPDIR/kimi-quota.jsonl" <<'EOF'
+{"role":"meta","type":"turn.step.retrying","error_name":"APIError","error_message":"quota exceeded for model kimi-for-coding"}
+EOF
+RETRY_OUT=$(agent_is_retriable "$TMPDIR/kimi-quota.jsonl" 1)
+assert_not_empty "kimi quota is retriable" "$RETRY_OUT"
+
+: > "$TMPDIR/kimi-rate-stderr.jsonl"
+cat > "$TMPDIR/kimi-rate-stderr.jsonl.err" <<'EOF'
+Error: rate limit exceeded, please retry later
+EOF
+RETRY_OUT=$(agent_is_retriable "$TMPDIR/kimi-rate-stderr.jsonl" 1)
+assert_not_empty "kimi rate limit in stderr is retriable" "$RETRY_OUT"
+
+cat > "$TMPDIR/kimi-503.jsonl" <<'EOF'
+{"role":"meta","type":"turn.step.retrying","error_name":"APIError","error_message":"503 service unavailable","status_code":503}
+EOF
+RETRY_OUT=$(agent_is_retriable "$TMPDIR/kimi-503.jsonl" 1)
+assert_not_empty "kimi 503 is retriable" "$RETRY_OUT"
+
+cat > "$TMPDIR/kimi-auth-err.jsonl" <<'EOF'
+EOF
+cat > "$TMPDIR/kimi-auth-err.jsonl.err" <<'EOF'
+Error: Invalid API key
+EOF
+RETRY_OUT=$(agent_is_retriable "$TMPDIR/kimi-auth-err.jsonl" 1)
+assert_eq "kimi auth error not retriable" "" "$RETRY_OUT"
+
+# ============================================================
+echo ""
+echo "=== 46. Kimi driver — agent_docker_env ==="
+
+KIMI_ENV=$(agent_docker_env "high")
+assert_contains "kimi docker_env effort flag" \
+    "KIMI_MODEL_THINKING_EFFORT=high" "$KIMI_ENV"
+
+KIMI_ENV=$(agent_docker_env "")
+assert_eq "kimi docker_env empty effort" "" "$KIMI_ENV"
+
+# ============================================================
+echo ""
+echo "=== 47. Kimi driver — agent_docker_auth ==="
+
+# API key from per-agent config (explicit apikey mode).
+AUTH_OUT=$(KIMI_API_KEY="" KIMI_CODE_HOME="/nonexistent" \
+    agent_docker_auth "sk-kimi-key" "" "apikey" "")
+assert_contains "kimi per-agent key" "KIMI_MODEL_API_KEY=sk-kimi-key" "$AUTH_OUT"
+assert_contains "kimi per-agent label" "SWARM_AUTH_MODE=key" "$AUTH_OUT"
+assert_contains "kimi telemetry disabled" "KIMI_DISABLE_TELEMETRY=1" "$AUTH_OUT"
+
+# API key from environment (explicit apikey mode).
+AUTH_OUT=$(KIMI_API_KEY="sk-env-key" KIMI_CODE_HOME="/nonexistent" \
+    agent_docker_auth "" "" "apikey" "")
+assert_contains "kimi env key" "KIMI_MODEL_API_KEY=sk-env-key" "$AUTH_OUT"
+assert_contains "kimi env key label" "SWARM_AUTH_MODE=key" "$AUTH_OUT"
+
+# Per-agent overrides env.
+AUTH_OUT=$(KIMI_API_KEY="sk-env" KIMI_CODE_HOME="/nonexistent" \
+    agent_docker_auth "sk-agent" "" "apikey" "")
+assert_contains "kimi per-agent overrides env" \
+    "KIMI_MODEL_API_KEY=sk-agent" "$AUTH_OUT"
+
+# base_url feeds the env provider's endpoint.
+AUTH_OUT=$(KIMI_API_KEY="" KIMI_CODE_HOME="/nonexistent" \
+    agent_docker_auth "sk-kimi" "" "apikey" "https://api.example.com/v1")
+assert_contains "kimi base_url forwarded" \
+    "KIMI_MODEL_BASE_URL=https://api.example.com/v1" "$AUTH_OUT"
+
+# No credentials at all.
+AUTH_OUT=$(KIMI_API_KEY="" KIMI_CODE_HOME="/nonexistent" \
+    agent_docker_auth "" "" "" "")
+assert_contains "kimi no creds has auth mode" "SWARM_AUTH_MODE=" "$AUTH_OUT"
+_key_count=$(echo "$AUTH_OUT" | grep -c "KIMI_MODEL_API_KEY" || true)
+assert_eq "kimi no creds no key flag" "0" "$_key_count"
+
+# OAuth mode: mounts the host data dir read-only.
+_fake_kimi_home="$TMPDIR/fake-kimi-home"
+mkdir -p "$_fake_kimi_home"
+AUTH_OUT=$(KIMI_API_KEY="" KIMI_CODE_HOME="$_fake_kimi_home" \
+    agent_docker_auth "" "" "oauth" "")
+assert_contains "kimi oauth mounts data dir" "$_fake_kimi_home" "$AUTH_OUT"
+assert_contains "kimi oauth mount flag" "--mount" "$AUTH_OUT"
+assert_contains "kimi oauth mount readonly" "readonly" "$AUTH_OUT"
+assert_contains "kimi oauth label" "SWARM_AUTH_MODE=oauth" "$AUTH_OUT"
+_key_count=$(echo "$AUTH_OUT" | grep -c "KIMI_MODEL_API_KEY" || true)
+assert_eq "kimi oauth no api key" "0" "$_key_count"
+
+# OAuth mode but data dir missing: warns, no mount.
+AUTH_OUT=$(KIMI_API_KEY="" KIMI_CODE_HOME="/nonexistent" \
+    agent_docker_auth "" "" "oauth" "" 2>/dev/null)
+_mount_count=$(echo "$AUTH_OUT" | grep -c "\-\-mount" || true)
+assert_eq "kimi oauth missing no mount" "0" "$_mount_count"
+
+# Auto-detect: API key + data dir both present.
+AUTH_OUT=$(KIMI_API_KEY="sk-both" KIMI_CODE_HOME="$_fake_kimi_home" \
+    agent_docker_auth "" "" "" "")
+assert_contains "kimi auto has api key" "KIMI_MODEL_API_KEY=sk-both" "$AUTH_OUT"
+assert_contains "kimi auto mounts data dir" "$_fake_kimi_home" "$AUTH_OUT"
+assert_contains "kimi auto label" "SWARM_AUTH_MODE=auto" "$AUTH_OUT"
+
+# Auto-detect: only data dir, no key.
+AUTH_OUT=$(KIMI_API_KEY="" KIMI_CODE_HOME="$_fake_kimi_home" \
+    agent_docker_auth "" "" "" "")
+assert_contains "kimi auto oauth-only mount" "$_fake_kimi_home" "$AUTH_OUT"
+assert_contains "kimi auto oauth-only label" "SWARM_AUTH_MODE=oauth" "$AUTH_OUT"
+
+# ============================================================
+echo ""
+echo "=== 48. Kimi driver — activity jq filter via file boundary ==="
+
+source "$DRIVERS_DIR/kimi-cli.sh"
+agent_activity_jq > "$TMPDIR/kimi.jq"
+
+KIMI_BASH='{"role":"assistant","tool_calls":[{"type":"function","id":"t1","function":{"name":"Bash","arguments":"{\"command\":\"npm test\"}"}}]}'
+K_BASH_OUT=$(echo "$KIMI_BASH" | \
+    AGENT_ID=8 SWARM_JQ_FILTER_FILE="$TMPDIR/kimi.jq" \
+    bash "$FILTER_DIR/activity-filter.sh" 2>/dev/null || true)
+assert_contains "kimi jq Bash" "Shell:" "$K_BASH_OUT"
+assert_contains "kimi jq Bash command" "npm test" "$K_BASH_OUT"
+
+KIMI_READ='{"role":"assistant","tool_calls":[{"type":"function","id":"t2","function":{"name":"Read","arguments":"{\"path\":\"src/main.ts\"}"}}]}'
+K_READ_OUT=$(echo "$KIMI_READ" | \
+    AGENT_ID=8 SWARM_JQ_FILTER_FILE="$TMPDIR/kimi.jq" \
+    bash "$FILTER_DIR/activity-filter.sh" 2>/dev/null || true)
+assert_contains "kimi jq Read" "Read " "$K_READ_OUT"
+assert_contains "kimi jq Read path" "src/main.ts" "$K_READ_OUT"
+
+KIMI_EDIT='{"role":"assistant","tool_calls":[{"type":"function","id":"t3","function":{"name":"Edit","arguments":"{\"path\":\"/workspace/src/utils.ts\"}"}}]}'
+K_EDIT_OUT=$(echo "$KIMI_EDIT" | \
+    AGENT_ID=8 SWARM_JQ_FILTER_FILE="$TMPDIR/kimi.jq" \
+    bash "$FILTER_DIR/activity-filter.sh" 2>/dev/null || true)
+assert_contains "kimi jq Edit" "Edit " "$K_EDIT_OUT"
+assert_contains "kimi jq Edit path" "/workspace/src/utils.ts" "$K_EDIT_OUT"
+
+KIMI_SEARCH='{"role":"assistant","tool_calls":[{"type":"function","id":"t4","function":{"name":"WebSearch","arguments":"{\"query\":\"kimi stream-json\"}"}}]}'
+K_SEARCH_OUT=$(echo "$KIMI_SEARCH" | \
+    AGENT_ID=8 SWARM_JQ_FILTER_FILE="$TMPDIR/kimi.jq" \
+    bash "$FILTER_DIR/activity-filter.sh" 2>/dev/null || true)
+assert_contains "kimi jq WebSearch" "Search:" "$K_SEARCH_OUT"
+
+KIMI_UNKNOWN='{"role":"assistant","tool_calls":[{"type":"function","id":"t5","function":{"name":"TodoList","arguments":"{}"}}]}'
+K_UNK_OUT=$(echo "$KIMI_UNKNOWN" | \
+    AGENT_ID=8 SWARM_JQ_FILTER_FILE="$TMPDIR/kimi.jq" \
+    bash "$FILTER_DIR/activity-filter.sh" 2>/dev/null || true)
+assert_contains "kimi jq unknown tool" "TodoList" "$K_UNK_OUT"
+
+# Tool results, text-only assistant messages, and meta lines are
+# silently skipped -- the tool_call line already carries the signal.
+KIMI_TOOL='{"role":"tool","tool_call_id":"t1","content":"ok"}'
+K_TOOL_OUT=$(echo "$KIMI_TOOL" | \
+    AGENT_ID=8 SWARM_JQ_FILTER_FILE="$TMPDIR/kimi.jq" \
+    bash "$FILTER_DIR/activity-filter.sh" 2>/dev/null || true)
+assert_eq "kimi jq tool result silent" "" "$K_TOOL_OUT"
+
+KIMI_TEXT='{"role":"assistant","content":"All done."}'
+K_TEXT_OUT=$(echo "$KIMI_TEXT" | \
+    AGENT_ID=8 SWARM_JQ_FILTER_FILE="$TMPDIR/kimi.jq" \
+    bash "$FILTER_DIR/activity-filter.sh" 2>/dev/null || true)
+assert_eq "kimi jq text-only assistant silent" "" "$K_TEXT_OUT"
+
+KIMI_META='{"role":"meta","type":"system.version","version":"0.28.0"}'
+K_META_OUT=$(echo "$KIMI_META" | \
+    AGENT_ID=8 SWARM_JQ_FILTER_FILE="$TMPDIR/kimi.jq" \
+    bash "$FILTER_DIR/activity-filter.sh" 2>/dev/null || true)
+assert_eq "kimi jq meta line silent" "" "$K_META_OUT"
+
+# ============================================================
+echo ""
+echo "=== 49. Kimi driver in config parsing ==="
+
+cat > "$TMPDIR/kimi_cfg.json" <<'EOF'
+{
+  "prompt": "p.md",
+  "driver": "kimi-cli",
+  "agents": [
+    { "count": 1, "model": "kimi-code/kimi-for-coding" },
+    { "count": 1, "model": "gpt-5.4", "driver": "codex-cli" }
+  ]
+}
+EOF
+
+TOP_DRIVER=$(jq -r '.driver // "claude-code"' "$TMPDIR/kimi_cfg.json")
+assert_eq "kimi top-level driver" "kimi-cli" "$TOP_DRIVER"
+
+AGENTS=$(jq -r '.driver as $dd | .agents[] |
+    (.driver // $dd // "claude-code")' "$TMPDIR/kimi_cfg.json")
+LINE1=$(echo "$AGENTS" | sed -n '1p')
+LINE2=$(echo "$AGENTS" | sed -n '2p')
+assert_eq "kimi agent1 inherits top driver" "kimi-cli"  "$LINE1"
+assert_eq "kimi agent2 per-agent driver"    "codex-cli" "$LINE2"
 
 # ============================================================
 echo ""
