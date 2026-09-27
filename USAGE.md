@@ -449,6 +449,7 @@ Unit tests (no Docker or API key):
 ./tests/test_activity_filter.sh  # Activity stream parsing.
 ./tests/test_config.sh         # Config parsing.
 ./tests/test_costs.sh          # Cost aggregation.
+./tests/test_coverage.sh       # Read coverage parsing.
 ./tests/test_dashboard.sh      # Dashboard rendering.
 ./tests/test_drivers.sh        # Agent driver interface.
 ./tests/test_format.sh         # Formatting helpers.
@@ -683,6 +684,43 @@ Dashboard columns:
 - **Turns** — number of assistant turns across all sessions.
 - **Tok/s** — output tokens per second of API time.
 - **Time** — cumulative wall-clock duration.
+
+## Coverage analysis
+
+Upfront partitioning (roles, lock files, per-group prompts) says
+what agents should read; `coverage.sh` reports what they actually
+read, from their session logs.
+
+```bash
+./coverage.sh                              # Table, from containers.
+./coverage.sh --json                       # JSON.
+./coverage.sh --targets targets.txt \
+    --prompt-out prompts/followup.md       # Gap report + prompt.
+./coverage.sh --logs ./saved-logs          # Offline, no Docker.
+```
+
+Read ranges come from `Read` tool calls (preferring the result's
+`startLine`/`numLines` metadata) and from a deterministic subset of
+shell reads: `sed -n 'A,Bp' F`, `nl -ba F | sed -n 'A,Bp'`,
+`cat [-n] F`, `head -n N F`, and `tail -n N F`.  Other read-like
+shell commands (`grep`, `rg`, `awk`, ...) are counted as
+unresolved and never guessed, so reported coverage is a lower
+bound.
+
+`--targets` takes one git pathspec per line (for example
+`src/**/*.rs`); `#` starts a comment.  The report then lists
+targets that were never read and the unread line ranges of
+partially read ones.  `--prompt-out FILE` writes those gaps as a
+follow-up prompt for another swarm run or an interactive session,
+and `--fail-under PCT` exits `2` when any target is below `PCT`
+percent read.  Paths are made relative by stripping `/workspace/`
+(override with `--strip`), and line counts come from `--root`
+(default: the repository root).
+
+Logs are copied from numbered agent and post-process containers,
+so run it before `./launch.sh` cleanup removes them, or save
+`agent_logs/` and use `--logs`.  Parsing currently targets the
+Claude Code `stream-json` format.
 
 ## Drivers
 

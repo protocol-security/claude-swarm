@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Feature: `coverage.sh` post-hoc read coverage.** Parse agent
+  session logs for `Read` tool calls and simple shell reads
+  (`sed -n`, `nl -ba | sed -n`, `cat`, `head`, `tail`), merge the
+  line ranges per file and agent, and report coverage as a table or
+  JSON.  `--targets` lists never-read and partially read target
+  files, `--prompt-out` turns the gaps into a follow-up prompt, and
+  `--fail-under` gives CI an exit code.  Works on containers or on
+  saved logs via `--logs`.  Closes #65.
+
 - **Rename: `claude-swarm` to `swarm-core`.** Update project links,
   installation examples, issue-template branding, pre-push stash
   labels, and test fixtures. Document URL updates for existing clones
